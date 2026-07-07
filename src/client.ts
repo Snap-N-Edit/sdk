@@ -388,7 +388,13 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
 
     const params: Record<string, unknown> = { ...(opts.params ?? {}) };
     if (opts.mask !== undefined) {
-      const { assetId: maskAssetId } = await upload(opts.mask, opts.mime ?? defaultMime(opts.mask));
+      // `opts.mime` describes `input`, not `mask` — a mask uploaded as a
+      // `Blob` carries its own declared type (`Blob.type`), which wins over
+      // `opts.mime` for the mask's upload. Only a non-`Blob` (`Uint8Array`)
+      // mask, which has no type of its own to report, falls back to
+      // `opts.mime` (then the generic binary default).
+      const maskMime = isBlob(opts.mask) ? defaultMime(opts.mask) : (opts.mime ?? defaultMime(opts.mask));
+      const { assetId: maskAssetId } = await upload(opts.mask, maskMime);
       params.maskAssetId = maskAssetId;
     }
 
@@ -408,8 +414,13 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
         // return value, or `created.status` when `isTerminal` already
         // confirmed it terminal. Handled explicitly (rather than a
         // non-exhaustive cast) so `JobStatus` gaining a new state is a
-        // compile error here, not a silent runtime fallthrough.
-        throw new SnapneditTimeoutError(`job ${created.jobId} did not reach a terminal state`);
+        // compile error here, not a silent runtime fallthrough. A plain
+        // `Error` (not `SnapneditTimeoutError`) — this is an internal
+        // invariant violation in this client's own control flow, not the
+        // distinct "polling actually ran out of time" condition
+        // `SnapneditTimeoutError` means (see `pollJob`, the only genuine
+        // throw site for that error).
+        throw new Error(`snapnedit sdk internal invariant violated: job ${created.jobId} resolved to non-terminal state "${finalStatus.state}" outside of polling`);
     }
   }
 

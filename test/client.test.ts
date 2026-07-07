@@ -125,6 +125,54 @@ describe('createClient().run — full success flow (upload -> job -> poll -> dow
     expect(authHeaderOf(calls[6]?.init)).toBeNull();
   });
 
+  test('a Blob mask carries its OWN declared mime, even when opts.mime (which describes the main input) differs', async () => {
+    const maskBlob = new Blob([maskBytes], { type: 'image/webp' });
+    const { fetch, calls } = scriptedFetch([
+      // 0-2: input upload — opts.mime ('image/png') applies here.
+      (url, init) => {
+        expect(jsonBodyOf(init)).toEqual({ mime: 'image/png', bytes: inputBytes.byteLength });
+        return jsonResponse(200, { assetId: 'asset-in', upload: { url: '/_local/put-in', expiresAt: 'x' } });
+      },
+      () => noBody(204),
+      () => jsonResponse(200, { assetId: 'asset-in', contentHash: 'h1', bytes: inputBytes.byteLength }),
+      // 3-5: mask upload — the mask Blob's OWN type ('image/webp') must win
+      // over opts.mime ('image/png'), which is only for the main input.
+      (url, init) => {
+        expect(jsonBodyOf(init)).toEqual({ mime: 'image/webp', bytes: maskBlob.size });
+        return jsonResponse(200, { assetId: 'asset-mask', upload: { url: '/_local/put-mask', expiresAt: 'x' } });
+      },
+      (url, init) => {
+        expect(init?.method).toBe('PUT');
+        expect(new Headers(init?.headers).get('content-type')).toBe('image/webp');
+        return noBody(204);
+      },
+      () => jsonResponse(200, { assetId: 'asset-mask', contentHash: 'h2', bytes: maskBlob.size }),
+      // 6: POST /jobs — cache hit, already succeeded.
+      () =>
+        jsonResponse(200, {
+          jobId: 'job-mime',
+          status: {
+            state: 'succeeded',
+            outputAssetId: 'asset-out',
+            download: { url: '/_local/get-out', expiresAt: 'x' },
+          },
+        }),
+      // 7: download
+      () => new Response(outputBytes, { status: 200, headers: { 'content-type': 'image/png' } }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    await client.run('generative-fill', inputBytes, {
+      mask: maskBlob,
+      mime: 'image/png',
+      params: { prompt: 'x' },
+    });
+
+    // Two independent upload-create calls, one per mime asserted above.
+    expect(calls[0]?.url).toBe(`${baseUrl}/uploads`);
+    expect(calls[3]?.url).toBe(`${baseUrl}/uploads`);
+  });
+
   test('generative-fill: uploads TWO assets (input + mask), sends maskAssetId + params, and skips polling on an immediate (cache-hit) succeeded status', async () => {
     const { fetch, calls } = scriptedFetch([
       // 0-2: input upload
