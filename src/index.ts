@@ -11,3 +11,5 @@ export type {
 } from './client.js';
 
 export { SnapneditApiError, SnapneditTimeoutError } from './errors.js';
+
+export type { DesignSpec, DesignLayerSpec, DesignLayerBase, DesignDocument, RenderFormat } from './design.js';

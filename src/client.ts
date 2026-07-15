@@ -20,6 +20,7 @@
  * for the same reason.
  */
 import type { ErrorCode, JobStatus, OperationId, SignedUrl } from '@snapnedit/shared';
+import type { DesignDocument, DesignSpec, RenderFormat } from './design.js';
 import { asErrorCode, SnapneditApiError, SnapneditTimeoutError } from './errors.js';
 
 /**
@@ -88,6 +89,15 @@ export interface SnapneditClient {
   createJob(operation: OperationId, inputAssetId: string, params?: Record<string, unknown>): Promise<CreateJobResult>;
   /** `GET /jobs/:id`. Non-throwing on a non-terminal or `failed`/`canceled` status — just returns it. */
   getJob(jobId: string): Promise<JobStatus>;
+  /**
+   * CREATE a design from a declarative {@link DesignSpec} — `POST /designs`.
+   * Returns the compiled editor `Document` (opaque; feed it to {@link renderDesign}
+   * or load it in the editor). This is how an agent composes a design, not just
+   * runs an image op.
+   */
+  createDesign(spec: DesignSpec): Promise<{ document: DesignDocument }>;
+  /** RENDER a design to image bytes — `POST /designs/render`, server-side (no browser). Pass a `spec` OR an already-created `document`. */
+  renderDesign(input: { spec?: DesignSpec; document?: DesignDocument; format?: RenderFormat }): Promise<Uint8Array>;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -424,5 +434,42 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     }
   }
 
-  return { run, upload, createJob, getJob };
+  async function createDesign(spec: DesignSpec): Promise<{ document: DesignDocument }> {
+    const url = apiUrl('/designs');
+    return requestJson(
+      fetchImpl,
+      url,
+      { method: 'POST', headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' }, body: JSON.stringify(spec) },
+      (json, sourceUrl) => {
+        const rec = asRecord(json);
+        const doc = rec ? asRecord(rec.document) : null;
+        if (!doc) {
+          throw new SnapneditApiError('internal', 0, `${sourceUrl} returned no document`);
+        }
+        return { document: doc };
+      },
+    );
+  }
+
+  async function renderDesign(
+    input: { spec?: DesignSpec; document?: DesignDocument; format?: RenderFormat },
+  ): Promise<Uint8Array> {
+    const url = apiUrl('/designs/render');
+    let res: Response;
+    try {
+      res = await fetchImpl(url, {
+        method: 'POST',
+        headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      });
+    } catch (cause) {
+      throw new SnapneditApiError('internal', 0, `network error POSTing to ${url}: ${errMessage(cause)}`);
+    }
+    if (!res.ok) {
+      throw new SnapneditApiError('internal', res.status, `${url} returned ${String(res.status)}`);
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  return { run, upload, createJob, getJob, createDesign, renderDesign };
 }
