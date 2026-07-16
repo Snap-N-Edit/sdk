@@ -12,4 +12,18 @@ export type {
 
 export { SnapneditApiError, SnapneditTimeoutError } from './errors.js';
 
-export type { DesignSpec, DesignLayerSpec, DesignLayerBase, DesignDocument, RenderFormat } from './design.js';
+export type {
+  DesignSpec,
+  DesignLayerSpec,
+  DesignLayerBase,
+  DesignBlendMode,
+  DesignTextRun,
+  DesignTextShadow,
+  DesignAdjustments,
+  DesignCrop,
+  DesignFrameFill,
+  MultiPageDesignSpec,
+  DesignDocument,
+  RenderFormat,
+  RenderDesignInput,
+} from './design.js';

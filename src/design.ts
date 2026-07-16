@@ -4,7 +4,12 @@
  * `editor-core` at runtime). The api is the source of truth + validates; these
  * exist purely for caller DX. The compiled `Document` is treated as opaque
  * (`DesignDocument`) — pass it straight to `renderDesign` or the editor.
+ *
+ * At FULL PARITY with the editor: every layer type + style, multi-page designs,
+ * and PDF output are all expressible here.
  */
+
+export type DesignBlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten';
 
 export interface DesignLayerBase {
   /** center x in document px */
@@ -13,7 +18,70 @@ export interface DesignLayerBase {
   y: number;
   /** degrees, clockwise */
   rotation?: number;
+  /** horizontal scale multiplier (negative flips horizontally); default 1 */
+  scaleX?: number;
+  /** vertical scale multiplier (negative flips vertically); default 1 */
+  scaleY?: number;
   opacity?: number;
+  blendMode?: DesignBlendMode;
+  /** default true; false hides the layer */
+  visible?: boolean;
+  locked?: boolean;
+  name?: string;
+}
+
+/** A styled character range within a text layer (`[start, end)` indices into `text`). */
+export interface DesignTextRun {
+  start: number;
+  end: number;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  fontFamily?: string;
+  fontSize?: number;
+}
+
+/** A text drop-shadow (offsets in the text's local pixel units). */
+export interface DesignTextShadow {
+  color: string;
+  blur: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+/** Non-destructive color/tone adjustments; each field is neutral at 0. */
+export interface DesignAdjustments {
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  exposure?: number;
+  temperature?: number;
+  tint?: number;
+  hue?: number;
+}
+
+/** A non-destructive crop/mask in the source image's natural-pixel space. */
+export interface DesignCrop {
+  shape: 'rect' | 'ellipse';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The image dropped into a frame — cover-fit, then panned/zoomed. */
+export interface DesignFrameFill {
+  url: string;
+  /** the image's natural pixel width */
+  width: number;
+  /** the image's natural pixel height */
+  height: number;
+  /** multiplies the cover-fit scale (default 1) */
+  zoom?: number;
+  /** pan x in frame-local px (default 0) */
+  offsetX?: number;
+  /** pan y in frame-local px (default 0) */
+  offsetY?: number;
 }
 
 export type DesignLayerSpec =
@@ -26,8 +94,22 @@ export type DesignLayerSpec =
       bold?: boolean;
       italic?: boolean;
       align?: 'left' | 'center' | 'right';
+      letterSpacing?: number;
+      stroke?: string | null;
+      strokeWidth?: number;
+      shadow?: DesignTextShadow | null;
+      runs?: DesignTextRun[];
+      width?: number;
+      height?: number;
     })
-  | (DesignLayerBase & { type: 'image'; url: string; width: number; height: number })
+  | (DesignLayerBase & {
+      type: 'image';
+      url: string;
+      width: number;
+      height: number;
+      adjustments?: DesignAdjustments;
+      crop?: DesignCrop;
+    })
   | (DesignLayerBase & {
       type: 'shape';
       shape: 'rect' | 'ellipse' | 'line' | 'triangle' | 'star';
@@ -37,7 +119,22 @@ export type DesignLayerSpec =
       stroke?: string | null;
       strokeWidth?: number;
     })
-  | (DesignLayerBase & { type: 'element'; svg: string; color?: string; size?: number });
+  | (DesignLayerBase & {
+      type: 'element';
+      svg: string;
+      color?: string;
+      /** square box shorthand; ignored if width+height are given */
+      size?: number;
+      width?: number;
+      height?: number;
+    })
+  | (DesignLayerBase & {
+      type: 'frame';
+      frameShape?: 'rect' | 'ellipse';
+      width: number;
+      height: number;
+      fill?: DesignFrameFill | null;
+    });
 
 export interface DesignSpec {
   width: number;
@@ -47,7 +144,22 @@ export interface DesignSpec {
   layers?: DesignLayerSpec[];
 }
 
+/** A multi-page design — an ordered list of single-page specs (one editor `Document` each). */
+export interface MultiPageDesignSpec {
+  pages: DesignSpec[];
+}
+
 /** The compiled editor document (opaque to the SDK — feed it to `renderDesign` or load it in the editor). */
 export type DesignDocument = Record<string, unknown>;
 
-export type RenderFormat = 'png' | 'jpeg';
+export type RenderFormat = 'png' | 'jpeg' | 'pdf';
+
+/** Input to `renderDesign` — a single spec/document, OR a multi-page `pages`/`documents` (which render to a PDF). */
+export interface RenderDesignInput {
+  spec?: DesignSpec;
+  document?: DesignDocument;
+  pages?: DesignSpec[];
+  documents?: DesignDocument[];
+  /** "png" | "jpeg" for a single page; "pdf" (or any multi-page input) produces a PDF. */
+  format?: RenderFormat;
+}

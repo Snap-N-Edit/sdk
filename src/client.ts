@@ -20,7 +20,7 @@
  * for the same reason.
  */
 import type { ErrorCode, JobStatus, OperationId, SignedUrl } from '@snapnedit/shared';
-import type { DesignDocument, DesignSpec, RenderFormat } from './design.js';
+import type { DesignDocument, DesignSpec, MultiPageDesignSpec, RenderDesignInput } from './design.js';
 import { asErrorCode, SnapneditApiError, SnapneditTimeoutError } from './errors.js';
 
 /**
@@ -96,8 +96,17 @@ export interface SnapneditClient {
    * runs an image op.
    */
   createDesign(spec: DesignSpec): Promise<{ document: DesignDocument }>;
-  /** RENDER a design to image bytes — `POST /designs/render`, server-side (no browser). Pass a `spec` OR an already-created `document`. */
-  renderDesign(input: { spec?: DesignSpec; document?: DesignDocument; format?: RenderFormat }): Promise<Uint8Array>;
+  /**
+   * CREATE a MULTI-PAGE design — `POST /designs` with `{ pages: [...] }`.
+   * Returns one compiled `Document` per page, in order.
+   */
+  createDesignPages(spec: MultiPageDesignSpec): Promise<{ documents: DesignDocument[] }>;
+  /**
+   * RENDER a design to image bytes — `POST /designs/render`, server-side (no
+   * browser). Pass a `spec` OR an already-created `document` for a single-page
+   * image (png/jpeg); pass `pages`/`documents` (or `format: 'pdf'`) for a PDF.
+   */
+  renderDesign(input: RenderDesignInput): Promise<Uint8Array>;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -451,9 +460,31 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     );
   }
 
-  async function renderDesign(
-    input: { spec?: DesignSpec; document?: DesignDocument; format?: RenderFormat },
-  ): Promise<Uint8Array> {
+  async function createDesignPages(spec: MultiPageDesignSpec): Promise<{ documents: DesignDocument[] }> {
+    const url = apiUrl('/designs');
+    return requestJson(
+      fetchImpl,
+      url,
+      { method: 'POST', headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' }, body: JSON.stringify(spec) },
+      (json, sourceUrl) => {
+        const rec = asRecord(json);
+        const list = rec ? rec.documents : null;
+        if (!Array.isArray(list)) {
+          throw new SnapneditApiError('internal', 0, `${sourceUrl} returned no documents array`);
+        }
+        const documents = list.map((entry, i) => {
+          const doc = asRecord(entry);
+          if (!doc) {
+            throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed document at index ${String(i)}`);
+          }
+          return doc;
+        });
+        return { documents };
+      },
+    );
+  }
+
+  async function renderDesign(input: RenderDesignInput): Promise<Uint8Array> {
     const url = apiUrl('/designs/render');
     let res: Response;
     try {
@@ -471,5 +502,5 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  return { run, upload, createJob, getJob, createDesign, renderDesign };
+  return { run, upload, createJob, getJob, createDesign, createDesignPages, renderDesign };
 }
