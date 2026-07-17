@@ -51,6 +51,8 @@ export interface DesignLayerBase {
   locked?: boolean;
   name?: string;
   effects?: DesignLayerEffects;
+  /** Optional group KEY — layers sharing the same string are grouped (move/select as a unit in the editor). */
+  group?: string;
 }
 
 /** A styled character range within a text layer (`[start, end)` indices into `text`). */
