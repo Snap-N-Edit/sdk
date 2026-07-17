@@ -120,6 +120,8 @@ export type DesignLayerSpec =
       italic?: boolean;
       align?: 'left' | 'center' | 'right';
       letterSpacing?: number;
+      /** Line spacing as a multiple of fontSize (default ~1.2). */
+      lineHeight?: number;
       stroke?: string | null;
       strokeWidth?: number;
       shadow?: DesignTextShadow | null;
