@@ -157,6 +157,15 @@ export type DesignLayerSpec =
       width: number;
       height: number;
       fill?: DesignFrameFill | null;
+    })
+  | (DesignLayerBase & {
+      type: 'path';
+      /** absolute document-space points (≥2); the layer position is derived from these */
+      points: { x: number; y: number }[];
+      stroke?: string;
+      strokeWidth?: number;
+      fill?: string | null;
+      closed?: boolean;
     });
 
 /** A linear-gradient background: `angle` degrees (0 = left→right, 90 = top→bottom; default 90). */
