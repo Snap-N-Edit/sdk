@@ -136,11 +136,18 @@ export type DesignLayerSpec =
       fill?: DesignFrameFill | null;
     });
 
+/** A linear-gradient background: `angle` degrees (0 = left→right, 90 = top→bottom; default 90). */
+export interface DesignGradientBackground {
+  from: string;
+  to: string;
+  angle?: number;
+}
+
 export interface DesignSpec {
   width: number;
   height: number;
-  /** "transparent" or a solid CSS color like "#ffffff". */
-  background?: string;
+  /** "transparent", a solid CSS color like "#ffffff", or a gradient {from,to,angle}. */
+  background?: string | DesignGradientBackground;
   layers?: DesignLayerSpec[];
 }
 
