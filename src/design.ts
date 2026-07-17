@@ -122,6 +122,8 @@ export type DesignLayerSpec =
       letterSpacing?: number;
       /** Line spacing as a multiple of fontSize (default ~1.2). */
       lineHeight?: number;
+      /** A linear gradient filling the text (overrides `color`). */
+      fillGradient?: DesignGradientBackground;
       stroke?: string | null;
       strokeWidth?: number;
       shadow?: DesignTextShadow | null;
@@ -142,7 +144,8 @@ export type DesignLayerSpec =
       shape: 'rect' | 'ellipse' | 'line' | 'triangle' | 'star';
       width: number;
       height: number;
-      fill?: string | null;
+      /** Solid CSS color, a linear gradient, or null for no fill. */
+      fill?: string | DesignGradientBackground | null;
       stroke?: string | null;
       strokeWidth?: number;
     })
