@@ -11,6 +11,28 @@
 
 export type DesignBlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten';
 
+/** A drop shadow effect ({@link DesignLayerEffects}). */
+export interface DesignDropShadow {
+  color: string;
+  blur: number;
+  offsetX: number;
+  offsetY: number;
+  opacity?: number;
+}
+
+/** An outer glow effect. */
+export interface DesignGlow {
+  color: string;
+  blur: number;
+}
+
+/** Per-layer visual effects — drop shadow / blur / glow. */
+export interface DesignLayerEffects {
+  shadow?: DesignDropShadow | null;
+  blur?: number;
+  glow?: DesignGlow | null;
+}
+
 export interface DesignLayerBase {
   /** center x in document px */
   x: number;
@@ -28,6 +50,7 @@ export interface DesignLayerBase {
   visible?: boolean;
   locked?: boolean;
   name?: string;
+  effects?: DesignLayerEffects;
 }
 
 /** A styled character range within a text layer (`[start, end)` indices into `text`). */
