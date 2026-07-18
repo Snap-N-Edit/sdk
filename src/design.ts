@@ -179,6 +179,8 @@ export type DesignLayerSpec =
       closed?: boolean;
       /** Render the points as a smooth Bézier curve (pen tool) instead of a polyline. */
       smooth?: boolean;
+      /** Explicit per-anchor Bézier control handles (absolute doc-space, index-aligned with points); overrides `smooth`. */
+      handles?: { in: { x: number; y: number } | null; out: { x: number; y: number } | null }[];
     });
 
 /** A linear-gradient background: `angle` degrees (0 = left→right, 90 = top→bottom; default 90). */
