@@ -177,6 +177,8 @@ export type DesignLayerSpec =
       strokeWidth?: number;
       fill?: string | null;
       closed?: boolean;
+      /** Render the points as a smooth Bézier curve (pen tool) instead of a polyline. */
+      smooth?: boolean;
     });
 
 /** A linear-gradient background: `angle` degrees (0 = left→right, 90 = top→bottom; default 90). */
