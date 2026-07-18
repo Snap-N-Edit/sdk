@@ -85,6 +85,10 @@ export interface DesignAdjustments {
   temperature?: number;
   tint?: number;
   hue?: number;
+  /** edge-darkening vignette post-pass, 0 (none) … 1 (strong) */
+  vignette?: number;
+  /** sharpen/clarity post-pass, 0 (none) … 1 (max) */
+  sharpen?: number;
 }
 
 /** A non-destructive crop/mask in the source image's natural-pixel space. */
