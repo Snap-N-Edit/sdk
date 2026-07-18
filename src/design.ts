@@ -53,6 +53,8 @@ export interface DesignLayerBase {
   effects?: DesignLayerEffects;
   /** Optional group KEY — layers sharing the same string are grouped (move/select as a unit in the editor). */
   group?: string;
+  /** Clip/mask the layer to a shape within its box (rounded rect / ellipse). */
+  clip?: { shape: 'rect' | 'ellipse'; radius?: number };
 }
 
 /** A styled character range within a text layer (`[start, end)` indices into `text`). */
