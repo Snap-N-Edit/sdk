@@ -124,6 +124,8 @@ export type DesignLayerSpec =
       lineHeight?: number;
       /** A linear gradient filling the text (overrides `color`). */
       fillGradient?: DesignGradientBackground;
+      /** Curve the text along an arc, in degrees (0 = straight, + up, - down). */
+      curve?: number;
       stroke?: string | null;
       strokeWidth?: number;
       shadow?: DesignTextShadow | null;
