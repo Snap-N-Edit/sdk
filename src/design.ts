@@ -145,13 +145,23 @@ export type DesignLayerSpec =
     })
   | (DesignLayerBase & {
       type: 'shape';
-      shape: 'rect' | 'ellipse' | 'line' | 'triangle' | 'star';
+      shape: 'rect' | 'ellipse' | 'line' | 'triangle' | 'star' | 'polygon' | 'arrow';
       width: number;
       height: number;
       /** Solid CSS color, a linear gradient, or null for no fill. */
       fill?: string | DesignGradientBackground | null;
       stroke?: string | null;
       strokeWidth?: number;
+      /** Vertex count for a "polygon" shape, 3-12 (default 6; ignored by other shapes). */
+      sides?: number;
+      /** Spike count for a "star" shape, 3-12 (default 5; ignored by other shapes). */
+      points?: number;
+      /** Inner/outer radius ratio for a "star" shape, 0.2-0.9 (default 0.4; ignored by other shapes). */
+      innerRatio?: number;
+      /** Arrowhead at the start of a "line" shape (ignored by other shapes). */
+      startHead?: 'none' | 'arrow';
+      /** Arrowhead at the end of a "line" shape (ignored by other shapes). */
+      endHead?: 'none' | 'arrow';
     })
   | (DesignLayerBase & {
       type: 'element';
