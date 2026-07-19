@@ -310,6 +310,19 @@ export type DesignLayerSpec =
        * than authored.
        */
       portraitBlur?: { amount: number; mask: { data: string; width: number; height: number } };
+      /**
+       * Perspective/keystone: a 4-corner homography warp. Each corner offset
+       * `{dx,dy}` (fraction of box width/height) drags that corner of the image
+       * content. All-zero/absent = none. Non-affine, so it is baked into a box
+       * raster for the SVG/export path.
+       */
+      perspective?: { tl: { dx: number; dy: number }; tr: { dx: number; dy: number }; br: { dx: number; dy: number }; bl: { dx: number; dy: number } };
+      /**
+       * Lens correction: barrel/pincushion radial distortion amount — `+1` = max
+       * barrel (bulge), `-1` = max pincushion, `0`/absent = none. Non-affine,
+       * baked into the raster for the SVG/export path (like `perspective`).
+       */
+      lens?: number;
     })
   | (DesignLayerBase & {
       type: 'shape';
