@@ -167,6 +167,42 @@ export interface DesignGradientMap {
   stops: DesignGradientMapStop[];
 }
 
+/**
+ * A local-adjustment REGION, in normalized 0..1 box-UV space (`(0,0)` = box
+ * top-left). Either a radial ellipse or a graduated linear ramp.
+ */
+export type DesignLocalAdjustRegion =
+  | {
+      type: 'radial';
+      /** ellipse center X in UV [0,1] */
+      cx: number;
+      /** ellipse center Y in UV [0,1] */
+      cy: number;
+      /** ellipse X radius (fraction of box width) */
+      rx: number;
+      /** ellipse Y radius (fraction of box height) */
+      ry: number;
+      /** feather fraction 0..1 (outer band over which coverage ramps 1→0) */
+      feather: number;
+    }
+  | {
+      type: 'graduated';
+      /** start point X in UV (coverage 0) */
+      x1: number;
+      /** start point Y in UV */
+      y1: number;
+      /** end point X in UV (coverage 1) */
+      x2: number;
+      /** end point Y in UV */
+      y2: number;
+    };
+
+/** One local/selective adjustment: a region + the adjustments applied within it (composited on top of the whole-image passes). */
+export interface DesignLocalAdjustment {
+  region: DesignLocalAdjustRegion;
+  adjustments: DesignAdjustments;
+}
+
 /** A non-destructive crop/mask in the source image's natural-pixel space. */
 export interface DesignCrop {
   shape: 'rect' | 'ellipse';
@@ -225,6 +261,8 @@ export type DesignLayerSpec =
       tone?: DesignTone;
       /** Gradient map (luminance → multi-stop gradient LUT); absent/<2 stops = identity. */
       gradientMap?: DesignGradientMap;
+      /** Local/selective adjustments: {region, adjustments} applied to a region (radial/graduated) rather than the whole image; composited on top in order. */
+      localAdjustments?: DesignLocalAdjustment[];
       crop?: DesignCrop;
     })
   | (DesignLayerBase & {

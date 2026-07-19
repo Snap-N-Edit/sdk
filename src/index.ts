@@ -28,6 +28,8 @@ export type {
   DesignTone,
   DesignGradientMapStop,
   DesignGradientMap,
+  DesignLocalAdjustRegion,
+  DesignLocalAdjustment,
   DesignCrop,
   DesignFrameFill,
   MultiPageDesignSpec,
