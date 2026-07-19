@@ -167,6 +167,28 @@ export interface DesignGradientMap {
   stops: DesignGradientMapStop[];
 }
 
+/** One hue band's shift for {@link DesignHslVibrance}: hue rotation / saturation scale / luminance shift, each neutral at 0 (sensible range ±1). */
+export interface DesignHslBand {
+  hue: number;
+  saturation: number;
+  luminance: number;
+}
+
+/**
+ * HSL-per-color + Vibrance: 8 hue bands (index-aligned to
+ * red/orange/yellow/green/aqua/blue/purple/magenta), each shifting
+ * hue/saturation/luminance, plus a global `vibrance` (saturation weighted toward
+ * the least-saturated pixels, with skin-tone protection). A per-pixel HSL
+ * transform baked into the source raster for the SVG/export path; absent =
+ * identity (no-op).
+ */
+export interface DesignHslVibrance {
+  /** 8 per-band shifts, index-aligned to red/orange/yellow/green/aqua/blue/purple/magenta. */
+  bands: DesignHslBand[];
+  /** global vibrance, -1 (mute) … 1 (boost); 0 = none. */
+  vibrance: number;
+}
+
 /**
  * A local-adjustment REGION, in normalized 0..1 box-UV space (`(0,0)` = box
  * top-left). Either a radial ellipse or a graduated linear ramp.
@@ -261,6 +283,8 @@ export type DesignLayerSpec =
       tone?: DesignTone;
       /** Gradient map (luminance → multi-stop gradient LUT); absent/<2 stops = identity. */
       gradientMap?: DesignGradientMap;
+      /** HSL-per-color + vibrance (8 hue bands + global vibrance); a per-pixel HSL transform, absent = identity. */
+      hslVibrance?: DesignHslVibrance;
       /** Local/selective adjustments: {region, adjustments} applied to a region (radial/graduated) rather than the whole image; composited on top in order. */
       localAdjustments?: DesignLocalAdjustment[];
       crop?: DesignCrop;
