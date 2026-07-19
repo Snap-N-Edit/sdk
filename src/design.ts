@@ -71,6 +71,12 @@ export interface DesignLayerBase {
   group?: string;
   /** Clip/mask the layer to a shape within its box (rounded rect / ellipse). */
   clip?: { shape: 'rect' | 'ellipse'; radius?: number };
+  /**
+   * Raster alpha mask stretched across the layer box: a grayscale PNG `data`:
+   * URL (white = visible, black = hidden) with its raster pixel dimensions.
+   * Usually PAINTED in the editor rather than authored here.
+   */
+  mask?: { data: string; width: number; height: number; enabled?: boolean };
 }
 
 /** A styled character range within a text layer (`[start, end)` indices into `text`). */
