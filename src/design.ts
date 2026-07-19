@@ -9,7 +9,23 @@
  * and PDF output are all expressible here.
  */
 
-export type DesignBlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten';
+export type DesignBlendMode =
+  | 'normal'
+  | 'multiply'
+  | 'screen'
+  | 'overlay'
+  | 'darken'
+  | 'lighten'
+  | 'color-dodge'
+  | 'color-burn'
+  | 'hard-light'
+  | 'soft-light'
+  | 'difference'
+  | 'exclusion'
+  | 'hue'
+  | 'saturation'
+  | 'color'
+  | 'luminosity';
 
 /** A drop shadow effect ({@link DesignLayerEffects}). */
 export interface DesignDropShadow {
@@ -89,6 +105,8 @@ export interface DesignAdjustments {
   vignette?: number;
   /** sharpen/clarity post-pass, 0 (none) … 1 (max) */
   sharpen?: number;
+  /** noise-reduction/denoise smoothing post-pass, 0 (none) … 1 (max) */
+  denoise?: number;
 }
 
 /** A single control point on a tone curve: input `x` → output `y`, both in [0,1]. */
