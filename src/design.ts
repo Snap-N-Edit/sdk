@@ -277,6 +277,15 @@ export type DesignLayerSpec =
        * rotation. 0/absent = none.
        */
       straighten?: number;
+      /**
+       * Portrait/background blur (bokeh): keeps the SUBJECT sharp and
+       * Gaussian-blurs the BACKGROUND behind it. `mask` is a grayscale subject
+       * raster (white = subject, black = background) as a PNG `data`: URL (+ its
+       * pixel size) stretched over the box; `amount` is 0..1 blur strength.
+       * Usually generated in the editor from a background-removal cutout rather
+       * than authored.
+       */
+      portraitBlur?: { amount: number; mask: { data: string; width: number; height: number } };
     })
   | (DesignLayerBase & {
       type: 'shape';
