@@ -91,6 +91,58 @@ export interface DesignAdjustments {
   sharpen?: number;
 }
 
+/** A single control point on a tone curve: input `x` → output `y`, both in [0,1]. */
+export interface DesignCurvePoint {
+  x: number;
+  y: number;
+}
+
+/** Composite levels for the tone LUT (all fields neutral by absence when the object is omitted). */
+export interface DesignLevels {
+  /** input black point [0,1], default 0 */
+  inBlack: number;
+  /** input white point [0,1], default 1 */
+  inWhite: number;
+  /** midtone gamma (>0), default 1 */
+  gamma: number;
+  /** output black point [0,1], default 0 */
+  outBlack: number;
+  /** output white point [0,1], default 1 */
+  outWhite: number;
+}
+
+/**
+ * Curves & Levels — a per-channel value LUT applied after the color matrix.
+ * Each curve is a list of {x,y} control points in [0,1] (empty/absent =
+ * identity); the composite `rgb` curve is applied to all channels before the
+ * per-channel `red`/`green`/`blue` curves. Absent = identity (no-op).
+ */
+export interface DesignTone {
+  /** composite curve applied to all channels */
+  rgb?: DesignCurvePoint[];
+  red?: DesignCurvePoint[];
+  green?: DesignCurvePoint[];
+  blue?: DesignCurvePoint[];
+  /** composite levels (all channels) */
+  levels?: DesignLevels;
+}
+
+/** One stop of a gradient map: a CSS hex color at a normalized luminance position [0,1]. */
+export interface DesignGradientMapStop {
+  color: string;
+  /** normalized luminance position, 0 (black) … 1 (white) */
+  position: number;
+}
+
+/**
+ * Gradient map — remaps the image's per-pixel luminance onto a multi-stop
+ * gradient (the multi-stop generalization of duotone). Needs ≥2 stops to take
+ * effect; absent/degenerate = identity (no-op).
+ */
+export interface DesignGradientMap {
+  stops: DesignGradientMapStop[];
+}
+
 /** A non-destructive crop/mask in the source image's natural-pixel space. */
 export interface DesignCrop {
   shape: 'rect' | 'ellipse';
@@ -145,6 +197,10 @@ export type DesignLayerSpec =
       width: number;
       height: number;
       adjustments?: DesignAdjustments;
+      /** Curves & Levels (per-channel value LUT); absent = identity. */
+      tone?: DesignTone;
+      /** Gradient map (luminance → multi-stop gradient LUT); absent/<2 stops = identity. */
+      gradientMap?: DesignGradientMap;
       crop?: DesignCrop;
     })
   | (DesignLayerBase & {
