@@ -264,6 +264,12 @@ export type DesignLayerSpec =
       /** Local/selective adjustments: {region, adjustments} applied to a region (radial/graduated) rather than the whole image; composited on top in order. */
       localAdjustments?: DesignLocalAdjustment[];
       crop?: DesignCrop;
+      /**
+       * Manual retouch overlay: a transparent RGBA PNG `data`: URL (+ its pixel
+       * size) composited over the image BEFORE adjustments; painted by the
+       * editor's clone/heal/dodge-burn/red-eye tools rather than authored.
+       */
+      retouch?: { data: string; width: number; height: number; enabled?: boolean };
     })
   | (DesignLayerBase & {
       type: 'shape';
