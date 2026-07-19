@@ -323,6 +323,14 @@ export type DesignLayerSpec =
        * baked into the raster for the SVG/export path (like `perspective`).
        */
       lens?: number;
+      /**
+       * Liquify/warp: a coarse displacement MESH `{cols,rows,dx,dy}` (`dx`/`dy`
+       * row-major, length `cols*rows`) of inverse-sample box-UV offsets the
+       * push/pull/bloat/pucker brushes paint. All-zero/absent = none. Non-affine,
+       * baked into a box raster for the SVG/export path (like `perspective`);
+       * usually painted in the editor rather than authored by hand.
+       */
+      liquify?: { cols: number; rows: number; dx: number[]; dy: number[] };
     })
   | (DesignLayerBase & {
       type: 'shape';
