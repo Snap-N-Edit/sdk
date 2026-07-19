@@ -270,6 +270,13 @@ export type DesignLayerSpec =
        * editor's clone/heal/dodge-burn/red-eye tools rather than authored.
        */
       retouch?: { data: string; width: number; height: number; enabled?: boolean };
+      /**
+       * Straighten (geometry correction): rotate the image content within its
+       * box by this many DEGREES (positive = clockwise) with an automatic
+       * crop-to-fill zoom so no empty corners show; distinct from the layer's
+       * rotation. 0/absent = none.
+       */
+      straighten?: number;
     })
   | (DesignLayerBase & {
       type: 'shape';
