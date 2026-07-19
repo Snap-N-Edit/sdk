@@ -113,6 +113,8 @@ export interface DesignAdjustments {
   sharpen?: number;
   /** noise-reduction/denoise smoothing post-pass, 0 (none) … 1 (max) */
   denoise?: number;
+  /** film-grain additive-noise post-pass, 0 (none) … 1 (strong) */
+  grain?: number;
 }
 
 /** A single control point on a tone curve: input `x` → output `y`, both in [0,1]. */
