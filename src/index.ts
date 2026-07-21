@@ -12,6 +12,19 @@ export type {
 
 export { SnapneditApiError, SnapneditTimeoutError } from './errors.js';
 
+export {
+  verifyWebhookSignature,
+  WEBHOOK_SIGNATURE_HEADER,
+  WEBHOOK_EVENT_HEADER,
+  WEBHOOK_DELIVERY_HEADER,
+} from './webhooks.js';
+export type {
+  WebhookEventType,
+  WebhookEventData,
+  WebhookDeliveryBody,
+  VerifyWebhookOptions,
+} from './webhooks.js';
+
 export type {
   DesignSpec,
   DesignLayerSpec,
