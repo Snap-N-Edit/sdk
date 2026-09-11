@@ -61,6 +61,8 @@ const KNOWN_ERROR_CODES = [
   'provider_exhausted',
   'rate_limited',
   'bot_check_failed',
+  'unauthorized',
+  'forbidden',
   'payment_required',
   'internal',
 ] as const;
