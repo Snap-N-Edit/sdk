@@ -593,3 +593,270 @@ describe('bring your own storage', () => {
     expect((caught as SnapneditApiError).code).toBe('input_fetch_failed');
   });
 });
+
+/**
+ * SAVED STORAGE DESTINATIONS — naming a bucket by id on a job, opting out of
+ * an account default, the `download: null` a `deleteAfterDelivery` job comes
+ * back with, and the six `/destinations` calls themselves.
+ */
+describe('saved storage destinations', () => {
+  const savedDestination: JobDestination = { type: 'saved', id: 'dst-1' };
+
+  const destinationRow = {
+    id: 'dst-1',
+    name: 'Production',
+    provider: 'aws-s3',
+    bucket: 'my-app-images',
+    region: 'us-east-1',
+    endpoint: null,
+    forcePathStyle: false,
+    keyPrefix: 'snapnedit/',
+    accessKeyIdLast4: 'MPLE',
+    isDefault: true,
+    deleteAfterDelivery: false,
+    lastTest: { status: 'ok', at: '2026-09-13T00:00:00.000Z' },
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-13T00:00:00.000Z',
+  };
+
+  test('createJob sends { type: "saved", id } and reads the named destination back', async () => {
+    const { fetch, calls } = scriptedFetch([
+      () =>
+        jsonResponse(202, {
+          jobId: 'job-s1',
+          status: { state: 'queued' },
+          input: { kind: 'asset' },
+          destination: { type: 'saved', id: 'dst-1', name: 'Production' },
+          delivery: null,
+        }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.createJob('upscale', 'asset-y', {}, { destination: savedDestination });
+
+    expect(jsonBodyOf(calls[0]?.init)).toEqual({
+      operation: 'upscale',
+      inputAssetId: 'asset-y',
+      params: {},
+      destination: { type: 'saved', id: 'dst-1' },
+    });
+    expect(result.destination).toEqual({ type: 'saved', id: 'dst-1', name: 'Production' });
+  });
+
+  test('destination: null is sent verbatim — it OPTS OUT of the account default', async () => {
+    const { fetch, calls } = scriptedFetch([
+      () => jsonResponse(202, { jobId: 'job-n', status: { state: 'queued' }, input: { kind: 'asset' }, destination: null, delivery: null }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.createJob('upscale', 'asset-y', {}, { destination: null });
+
+    // `null`, not omitted: those mean different things to the api.
+    expect(jsonBodyOf(calls[0]?.init)).toEqual({
+      operation: 'upscale',
+      inputAssetId: 'asset-y',
+      params: {},
+      destination: null,
+    });
+    expect(result.destination).toBeNull();
+  });
+
+  test('run() with a delivered result and download: null returns { downloaded: false } rather than throwing', async () => {
+    const { fetch, calls } = scriptedFetch([
+      () =>
+        jsonResponse(200, {
+          jobId: 'job-gone',
+          // deleteAfterDelivery: our copy was removed the moment the bucket
+          // confirmed the write, so there is no url to sign.
+          status: { state: 'succeeded', outputAssetId: 'asset-out', download: null },
+          input: { kind: 'asset' },
+          destination: { type: 'saved', id: 'dst-1', name: 'Production' },
+          delivery: {
+            status: 'delivered',
+            attempts: 1,
+            statusCode: 200,
+            bucket: 'my-app-images',
+            key: 'snapnedit/2026/09/13/job-gone.png',
+            localCopyDeleted: true,
+          },
+        }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    // Even asking for the bytes explicitly must not throw — there are none.
+    const result = await client.run('remove-background', { url: 'https://bucket.example.com/in.png' }, {
+      destination: savedDestination,
+      download: true,
+    });
+
+    expect(result.downloaded).toBe(false);
+    expect(result.output).toBeUndefined();
+    expect(result.download).toBeNull();
+    expect(result.delivery).toMatchObject({
+      status: 'delivered',
+      bucket: 'my-app-images',
+      key: 'snapnedit/2026/09/13/job-gone.png',
+      localCopyDeleted: true,
+    });
+    // POST /jobs only — no attempt to fetch a url that isn't there.
+    expect(calls).toHaveLength(1);
+  });
+
+  test('run() keeps polling a CACHE HIT whose delivery is still pending, and reports the settled outcome', async () => {
+    const pending = {
+      jobId: 'job-cache',
+      // A cache hit with a destination: already succeeded, delivery not yet run.
+      status: { state: 'succeeded', outputAssetId: 'asset-out', download: { url: '/_local/get-out', expiresAt: 'x' } },
+      input: { kind: 'asset' },
+      destination: { type: 'saved', id: 'dst-1', name: 'Production' },
+      delivery: { status: 'pending', attempts: 0 },
+    };
+    const { fetch, calls } = scriptedFetch([
+      () => jsonResponse(202, pending),
+      // 1: still pending
+      () => jsonResponse(200, { ...pending.status, input: pending.input, destination: pending.destination, delivery: { status: 'pending', attempts: 0 } }),
+      // 2: the worker delivered it
+      () =>
+        jsonResponse(200, {
+          ...pending.status,
+          input: pending.input,
+          destination: pending.destination,
+          delivery: { status: 'delivered', attempts: 1, statusCode: 200, bucket: 'my-app-images', key: 'snapnedit/2026/09/13/job-cache.png' },
+        }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.run('remove-background', { url: 'https://bucket.example.com/in.png' }, {
+      destination: savedDestination,
+      pollIntervalMs: 1,
+    });
+
+    // Create + two polls: a `succeeded` status with a PENDING delivery is not
+    // yet an answer.
+    expect(calls).toHaveLength(3);
+    expect(result.downloaded).toBe(false);
+    expect(result.delivery).toMatchObject({ status: 'delivered', key: 'snapnedit/2026/09/13/job-cache.png' });
+  });
+
+  test('listDestinations() narrows every row of GET /destinations', async () => {
+    const { fetch, calls } = scriptedFetch([
+      (url, init) => {
+        expect(url).toBe(`${baseUrl}/destinations`);
+        expect(init?.method).toBe('GET');
+        return jsonResponse(200, { destinations: [destinationRow] });
+      },
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const destinations = await client.listDestinations();
+
+    expect(authHeaderOf(calls[0]?.init)).toBe(`Bearer ${apiKey}`);
+    expect(destinations).toEqual([destinationRow]);
+  });
+
+  test('createDestination() posts the input and returns the credential-free view', async () => {
+    const input = {
+      name: 'Production',
+      provider: 'aws-s3' as const,
+      bucket: 'my-app-images',
+      region: 'us-east-1',
+      keyPrefix: 'snapnedit/',
+      accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+      secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      isDefault: true,
+    };
+    const { fetch, calls } = scriptedFetch([
+      (url, init) => {
+        expect(url).toBe(`${baseUrl}/destinations`);
+        expect(init?.method).toBe('POST');
+        return jsonResponse(201, { destination: destinationRow });
+      },
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const created = await client.createDestination(input);
+
+    expect(jsonBodyOf(calls[0]?.init)).toEqual(input);
+    expect(created.id).toBe('dst-1');
+    // The secret went out and did not come back.
+    expect(JSON.stringify(created)).not.toContain('wJalrXUtnFEMI');
+  });
+
+  test('updateDestination() PATCHes, deleteDestination() takes a 204 with no body', async () => {
+    const { fetch, calls } = scriptedFetch([
+      (url, init) => {
+        expect(url).toBe(`${baseUrl}/destinations/dst-1`);
+        expect(init?.method).toBe('PATCH');
+        return jsonResponse(200, { destination: { ...destinationRow, name: 'Renamed' } });
+      },
+      (url, init) => {
+        expect(url).toBe(`${baseUrl}/destinations/dst-1`);
+        expect(init?.method).toBe('DELETE');
+        return noBody(204);
+      },
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const patched = await client.updateDestination('dst-1', { name: 'Renamed' });
+    expect(patched.name).toBe('Renamed');
+    expect(jsonBodyOf(calls[0]?.init)).toEqual({ name: 'Renamed' });
+
+    // A 204 has no JSON body at all — parsing one would throw.
+    await expect(client.deleteDestination('dst-1')).resolves.toBeUndefined();
+  });
+
+  test('testDestination() reports both outcomes without throwing on a failed probe', async () => {
+    const ok = scriptedFetch([
+      (url, init) => {
+        expect(url).toBe(`${baseUrl}/destinations/dst-1/test`);
+        expect(init?.method).toBe('POST');
+        return jsonResponse(200, { ok: true, latencyMs: 42 });
+      },
+    ]);
+    await expect(createClient({ baseUrl, apiKey, fetch: ok.fetch }).testDestination('dst-1')).resolves.toEqual({
+      ok: true,
+      latencyMs: 42,
+    });
+
+    const failed = scriptedFetch([() => jsonResponse(200, { ok: false, latencyMs: 12, error: 'AccessDenied' })]);
+    await expect(createClient({ baseUrl, apiKey, fetch: failed.fetch }).testDestination('dst-1')).resolves.toEqual({
+      ok: false,
+      latencyMs: 12,
+      error: 'AccessDenied',
+    });
+  });
+
+  test('presignDestinationUpload() returns the signed slot verbatim', async () => {
+    const { fetch, calls } = scriptedFetch([
+      (url, init) => {
+        expect(url).toBe(`${baseUrl}/destinations/dst-1/presign`);
+        expect(init?.method).toBe('POST');
+        return jsonResponse(200, {
+          url: 'https://my-app-images.s3.amazonaws.com/snapnedit/2026/09/13/export-1-abc.png?X-Amz-Signature=sig',
+          method: 'PUT',
+          headers: { 'content-type': 'image/png' },
+          key: 'snapnedit/2026/09/13/export-1-abc.png',
+          bucket: 'my-app-images',
+          expiresAt: '2026-09-13T00:15:00.000Z',
+        });
+      },
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const slot = await client.presignDestinationUpload('dst-1', { ext: 'png', contentType: 'image/png' });
+
+    expect(jsonBodyOf(calls[0]?.init)).toEqual({ ext: 'png', contentType: 'image/png' });
+    expect(slot.method).toBe('PUT');
+    expect(slot.key).toBe('snapnedit/2026/09/13/export-1-abc.png');
+    expect(slot.headers).toEqual({ 'content-type': 'image/png' });
+  });
+
+  test('a 404 from a destination route surfaces as a typed SnapneditApiError', async () => {
+    const { fetch } = scriptedFetch([
+      () => jsonResponse(404, { error: { code: 'not_found', message: 'storage destination not found: dst-9' } }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    await expect(client.testDestination('dst-9')).rejects.toBeInstanceOf(SnapneditApiError);
+  });
+});

@@ -4,6 +4,7 @@ export type {
   CreateClientOptions,
   CreateJobOptions,
   CreateJobResult,
+  DestinationTestResult,
   FetchLike,
   JobEnvelope,
   JobInputRef,
@@ -22,7 +23,35 @@ export type {
  * a `destination` (or a `delivery` outcome) without depending on
  * `@snapnedit/shared` themselves. Type-only — see `client.ts`'s module doc.
  */
-export type { JobDelivery, JobDeliveryStatus, JobDestination, JobInputKind } from '@snapnedit/shared/jobRequest';
+export type {
+  JobDelivery,
+  JobDeliveryStatus,
+  JobDestination,
+  JobDestinationSummary,
+  JobInputKind,
+} from '@snapnedit/shared/jobRequest';
+
+/**
+ * The SAVED STORAGE DESTINATION wire types — the shapes
+ * `listDestinations()` / `createDestination()` / `updateDestination()` /
+ * `presignDestinationUpload()` speak. Same rule: `import type` only, straight
+ * from the shared subpath, so the SDK and the api cannot describe a
+ * destination differently.
+ */
+export type {
+  DestinationExportExt,
+  DestinationPresignRequest,
+  DestinationPresignResponse,
+  StorageDestinationInput,
+  StorageDestinationPatchInput,
+  StorageDestinationSummary,
+  StorageDestinationTest,
+  StorageDestinationView,
+  StorageProvider,
+} from '@snapnedit/shared/jobRequest';
+
+/** The job-status union, including the `download: null` (delete-after-delivery) variant. */
+export type { JobStatus, JobStatusDelivered, JobStatusResponse, SignedUrl } from '@snapnedit/shared';
 
 export { KNOWN_ERROR_CODES, SnapneditApiError, SnapneditTimeoutError } from './errors.js';
 

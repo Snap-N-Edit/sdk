@@ -154,6 +154,94 @@ Job and webhook payloads both carry the same three fields — `input: { kind }`,
 `destination: { type } | null` and `delivery | null` — so a webhook receiver sees
 the delivery outcome without polling.
 
+## Saved destinations
+
+A presigned URL per job is one way. The other is to save the bucket **once** — on
+your snapnedit account — and name it by id. The server then signs every upload
+itself, which is what makes an account **default** possible: configure it once and
+every job's result lands in your bucket with nothing extra in the request.
+
+```ts
+const destinations = await client.listDestinations();
+const production = destinations.find((d) => d.isDefault) ?? destinations[0];
+
+const result = await client.run('remove-background', bytes, {
+  destination: { type: 'saved', id: production.id },
+});
+
+result.delivery;
+// { status: 'delivered', attempts: 1, statusCode: 200,
+//   bucket: 'my-app-images', key: 'snapnedit/2026/09/13/<job-id>.png' }
+```
+
+- **The default applies automatically.** With a default destination saved, plain
+  `run(op, bytes)` is delivered to it — no `destination` field at all.
+- **`destination: null` opts out** of that default for one job. `null` and omitted
+  are different: omitted means "use my default if I have one".
+- **A foreign id is a `404`**, not a `403` — a destination id must not be an
+  existence oracle.
+
+### Managing them
+
+```ts
+await client.listDestinations();                                 // GET    /destinations
+await client.createDestination({                                 // POST   /destinations
+  name: 'Production',
+  provider: 'aws-s3',            // | 'cloudflare-r2' | 'backblaze-b2' | 's3-compatible'
+  bucket: 'my-app-images',
+  region: 'us-east-1',           // R2 derives its endpoint from `accountId` instead
+  keyPrefix: 'snapnedit/',       // results land at <prefix>YYYY/MM/DD/<job-id>.<ext>
+  accessKeyId: 'AKIA...',
+  secretAccessKey: '...',
+  isDefault: true,
+});
+await client.updateDestination(id, { name: 'Renamed' });         // PATCH  /destinations/:id
+await client.deleteDestination(id);                              // DELETE /destinations/:id
+await client.testDestination(id);                                // POST   /destinations/:id/test
+await client.presignDestinationUpload(id, { ext: 'png', contentType: 'image/png' });
+```
+
+The secret access key is encrypted at rest and never returned by any endpoint —
+a destination view carries `accessKeyIdLast4` and nothing else of the credential.
+`testDestination()` is a REAL write probe (a tiny object written under your prefix
+and deleted again) and resolves either way rather than throwing:
+`{ ok: true, latencyMs }` or `{ ok: false, latencyMs, error }`. Max 10 destinations
+per account.
+
+`presignDestinationUpload()` mints a 15-minute signed PUT for one object in your
+own bucket — for uploading something you produced yourself, without putting your S3
+credentials in a browser.
+
+### Delete after delivery
+
+A destination can be set to drop the snapnedit copy the moment your bucket confirms
+the write. Its jobs stay `succeeded` and keep their `outputAssetId`, but there is no
+URL left to sign:
+
+```ts
+const result = await client.run('remove-background', bytes, { destination: { type: 'saved', id } });
+
+result.downloaded;                 // false
+result.download;                   // null — the only copy is in your bucket
+result.delivery?.localCopyDeleted; // true
+result.delivery?.key;              // ...where it is
+```
+
+`run()` returns `{ downloaded: false }` here rather than throwing, even with
+`download: true` — there are genuinely no bytes to fetch. `JobView`'s succeeded
+branch is typed accordingly (`download: SignedUrl | null`), so narrow before
+dereferencing.
+
+### Cache hits are delivered too
+
+Identical jobs are served from the result cache without re-running the model. With a
+destination, that cached result is **still** delivered: the server creates a new,
+already-`succeeded` job for it whose `delivery` starts `pending`, and `run()` polls
+until that delivery settles before resolving. It costs no credits, since nothing ran.
+
+Full setup and per-provider bucket permissions:
+<https://snapnedit.com/docs/storage-destinations>.
+
 ## Operations
 
 The first argument to `run()`/`createJob()` is an `OperationId`. The full set

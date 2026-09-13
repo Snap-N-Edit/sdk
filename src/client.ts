@@ -19,7 +19,7 @@
  * `asErrorCode`) rather than by re-using `@snapnedit/shared`'s zod schemas,
  * for the same reason.
  */
-import type { ErrorCode, JobStatus, OperationId, SignedUrl } from '@snapnedit/shared';
+import type { ErrorCode, JobStatus, JobStatusResponse, OperationId, SignedUrl } from '@snapnedit/shared';
 // The bring-your-own-storage wire types come from the `@snapnedit/shared`
 // SUBPATH (`/jobRequest`), not its barrel — and, like every other import in
 // this file, `import type` only. `jobRequest.ts` is itself browser-safe (its
@@ -27,7 +27,19 @@ import type { ErrorCode, JobStatus, OperationId, SignedUrl } from '@snapnedit/sh
 // in this package's runtime graph; taking the types alone keeps the "zero
 // runtime dependencies" promise intact while guaranteeing the SDK and the api
 // describe a destination with literally the same type.
-import type { JobDelivery, JobDestination, JobInputKind } from '@snapnedit/shared/jobRequest';
+import type {
+  DestinationPresignRequest,
+  DestinationPresignResponse,
+  JobDelivery,
+  JobDestination,
+  JobDestinationSummary,
+  JobInputKind,
+  StorageDestinationInput,
+  StorageDestinationPatchInput,
+  StorageDestinationTest,
+  StorageDestinationView,
+  StorageProvider,
+} from '@snapnedit/shared/jobRequest';
 import type { DesignDocument, DesignSpec, MultiPageDesignSpec, RenderDesignInput } from './design.js';
 import { asErrorCode, SnapneditApiError, SnapneditTimeoutError } from './errors.js';
 
@@ -79,12 +91,24 @@ export type JobInputRef = string | JobUrlInput;
  */
 export interface JobEnvelope {
   input: { kind: JobInputKind };
-  destination: { type: 'presigned-put' } | null;
+  /**
+   * `{ type: 'presigned-put' }` for a url you signed, or
+   * `{ type: 'saved', id, name? }` for one of your saved storage destinations
+   * (`name` is absent only if the destination has since been deleted).
+   */
+  destination: JobDestinationSummary | null;
   delivery: JobDelivery | null;
 }
 
-/** What `GET /jobs/:id` returns: the job's {@link JobStatus} plus its {@link JobEnvelope}. */
-export type JobView = JobStatus & JobEnvelope;
+/**
+ * What `GET /jobs/:id` returns: the job's status plus its {@link JobEnvelope}.
+ *
+ * The status is a {@link JobStatusResponse}, not a plain `JobStatus`: a job
+ * delivered to a saved destination with `deleteAfterDelivery` set has had our
+ * copy removed, so its `succeeded` branch carries `download: null`. Narrow
+ * with `if (job.state === 'succeeded' && job.download)` before dereferencing.
+ */
+export type JobView = JobStatusResponse & JobEnvelope;
 
 export interface CreateClientOptions {
   /** Origin of the snapnedit api, e.g. `https://api.snapnedit.com` or `http://localhost:8787`. No trailing slash required. */
@@ -98,16 +122,26 @@ export interface CreateClientOptions {
 /** Options for {@link SnapneditClient.createJob}. */
 export interface CreateJobOptions {
   /**
-   * BRING YOUR OWN STORAGE, output half: a presigned PUT the server delivers
-   * the RESULT bytes to, so they never round-trip through the caller. The
-   * wire type verbatim — `{ type: 'presigned-put', url, headers? }`.
+   * BRING YOUR OWN STORAGE, output half: where the server delivers the RESULT
+   * bytes, so they never round-trip through the caller. The wire type
+   * verbatim, in one of three forms:
    *
-   * `headers` are the ones the presigned signature requires; only
-   * `content-type`, `cache-control`, `content-disposition` and `x-amz-*` /
-   * `x-goog-*` / `x-ms-*` are accepted (at most 16), anything else is a `400`.
+   *  - `{ type: 'presigned-put', url, headers? }` — a PUT you signed
+   *    yourself. `headers` are the ones the signature requires; only
+   *    `content-type`, `cache-control`, `content-disposition` and `x-amz-*` /
+   *    `x-goog-*` / `x-ms-*` are accepted (at most 16), anything else is a
+   *    `400`.
+   *  - `{ type: 'saved', id }` — one of your account's saved storage
+   *    destinations ({@link SnapneditClient.listDestinations}). The SERVER
+   *    signs the upload, so nothing about your bucket has to be in this
+   *    process at all.
+   *  - `null` — explicitly OPT OUT of your account's default destination for
+   *    this one job. Omitting the field means "use my default if I have one".
+   *
    * Requires an API key (or embed token) — anonymous gets a `403 forbidden`.
+   * `null` is exempt: it opts out of a default an anonymous caller has none of.
    */
-  destination?: JobDestination;
+  destination?: JobDestination | null;
 }
 
 export interface RunOptions extends CreateJobOptions {
@@ -133,8 +167,11 @@ export interface RunOptions extends CreateJobOptions {
    *
    * Set it explicitly to override either way: `true` to get the bytes as well
    * as the delivery, `false` to skip the download and just poll to completion.
-   * The result always carries `download` (a presigned url) so a skipped
-   * download can be performed later regardless.
+   * The result carries `download` (a presigned url) so a skipped download can
+   * be performed later regardless — EXCEPT for a saved destination with
+   * `deleteAfterDelivery`, where our copy is gone the moment your bucket
+   * confirms the write: `download` is then `null` and the result is
+   * `{ downloaded: false }` even with `download: true`, rather than an error.
    */
   download?: boolean;
 }
@@ -143,13 +180,20 @@ export interface RunOptions extends CreateJobOptions {
 interface RunResultBase extends JobEnvelope {
   /** Id of the job that produced this result. */
   jobId: string;
-  /** Presigned url for the result, whether or not `run()` downloaded it. */
-  download: SignedUrl;
+  /**
+   * Presigned url for the result, whether or not `run()` downloaded it —
+   * `null` when there is no copy on our side to sign one for: the job was
+   * delivered to a saved destination with `deleteAfterDelivery` set, so the
+   * only copy is the one in your bucket (at `delivery.bucket`/`delivery.key`).
+   */
+  download: SignedUrl | null;
 }
 
 /** A {@link RunResult} whose bytes were downloaded (the default). */
 export interface RunDownloadedResult extends RunResultBase {
   downloaded: true;
+  /** Always present on this branch — the bytes came from it. */
+  download: SignedUrl;
   output: Uint8Array;
   mime: string;
 }
@@ -174,8 +218,18 @@ export interface UploadResult {
 
 export interface CreateJobResult extends JobEnvelope {
   jobId: string;
-  status: JobStatus;
+  status: JobStatusResponse;
 }
+
+/**
+ * The outcome of {@link SnapneditClient.testDestination} — a REAL round trip
+ * against the bucket (a tiny probe object written under the destination's own
+ * prefix, then deleted), not a credential format check. Always resolves: the
+ * HTTP call succeeded either way, and `ok` says whether the bucket did.
+ */
+export type DestinationTestResult =
+  | { ok: true; latencyMs: number }
+  | { ok: false; latencyMs: number; error: string };
 
 export interface SnapneditClient {
   /**
@@ -208,6 +262,40 @@ export interface SnapneditClient {
   ): Promise<CreateJobResult>;
   /** `GET /jobs/:id`. Non-throwing on a non-terminal or `failed`/`canceled` status — just returns it, with the `input`/`destination`/`delivery` envelope. */
   getJob(jobId: string): Promise<JobView>;
+
+  // --- saved storage destinations ------------------------------------------
+  //
+  // Your account's own S3-compatible buckets, saved once and named by id on a
+  // job (`destination: { type: 'saved', id }`) — or marked as your default,
+  // after which every job you create is delivered to them with no
+  // `destination` field at all. See https://snapnedit.com/docs/storage-destinations.
+
+  /** `GET /destinations` — every saved destination on the account, credential-free (only the access key's last 4 characters are ever returned). */
+  listDestinations(): Promise<StorageDestinationView[]>;
+  /**
+   * `POST /destinations` — saves a bucket and its credentials. The secret
+   * access key is encrypted at rest and never returned by any endpoint,
+   * including this one. Max 10 per account.
+   */
+  createDestination(input: StorageDestinationInput): Promise<StorageDestinationView>;
+  /**
+   * `PATCH /destinations/:id`. Every field is optional, but `accessKeyId` and
+   * `secretAccessKey` must move together; `provider` is not patchable (it
+   * decides which other fields are required — change it with a delete +
+   * create).
+   */
+  updateDestination(id: string, patch: StorageDestinationPatchInput): Promise<StorageDestinationView>;
+  /** `DELETE /destinations/:id`. Deleting your default simply leaves the account without one; jobs already queued against it stop being delivered. */
+  deleteDestination(id: string): Promise<void>;
+  /** `POST /destinations/:id/test` — proves the credentials can WRITE, by writing (and deleting) a probe object under the destination's prefix. */
+  testDestination(id: string): Promise<DestinationTestResult>;
+  /**
+   * `POST /destinations/:id/presign` — a short-lived (15 minute), server-signed
+   * PUT for ONE object in your own bucket, for uploading something you produced
+   * yourself (an editor export, say) without ever putting your S3 credentials
+   * in a browser. `contentType` must be the canonical type for `ext`.
+   */
+  presignDestinationUpload(id: string, request: DestinationPresignRequest): Promise<DestinationPresignResponse>;
   /**
    * CREATE a design from a declarative {@link DesignSpec} — `POST /designs`.
    * Returns the compiled editor `Document` (opaque; feed it to {@link renderDesign}
@@ -319,7 +407,7 @@ function validateConfirmResponse(json: unknown, sourceUrl: string): { assetId: s
   return { assetId: asString(rec.assetId, 'assetId', sourceUrl) };
 }
 
-function validateJobStatus(json: unknown, sourceUrl: string): JobStatus {
+function validateJobStatus(json: unknown, sourceUrl: string): JobStatusResponse {
   const rec = asRecord(json);
   if (!rec) {
     throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed job status`);
@@ -331,11 +419,20 @@ function validateJobStatus(json: unknown, sourceUrl: string): JobStatus {
     case 'processing':
       return { state: 'processing', startedAt: asString(rec.startedAt, 'startedAt', sourceUrl) };
     case 'succeeded':
-      return {
-        state: 'succeeded',
-        outputAssetId: asString(rec.outputAssetId, 'outputAssetId', sourceUrl),
-        download: validateSignedUrl(rec.download, sourceUrl),
-      };
+      // `download: null` is a real, documented outcome, not a malformed body:
+      // a job delivered to a saved destination with `deleteAfterDelivery` set
+      // has no copy left on our side to sign a url for.
+      return rec.download === null
+        ? {
+            state: 'succeeded',
+            outputAssetId: asString(rec.outputAssetId, 'outputAssetId', sourceUrl),
+            download: null,
+          }
+        : {
+            state: 'succeeded',
+            outputAssetId: asString(rec.outputAssetId, 'outputAssetId', sourceUrl),
+            download: validateSignedUrl(rec.download, sourceUrl),
+          };
     case 'failed':
       return {
         state: 'failed',
@@ -363,13 +460,26 @@ function validateJobStatus(json: unknown, sourceUrl: string): JobStatus {
 function validateJobEnvelope(rec: Record<string, unknown>): JobEnvelope {
   const input = asRecord(rec.input);
   const kind: JobInputKind = input?.kind === 'url' ? 'url' : 'asset';
-  const destination = asRecord(rec.destination);
   const delivery = asRecord(rec.delivery);
   return {
     input: { kind },
-    destination: destination?.type === 'presigned-put' ? { type: 'presigned-put' } : null,
+    destination: validateJobDestination(asRecord(rec.destination)),
     delivery: delivery ? validateJobDelivery(delivery) : null,
   };
+}
+
+/** Narrows a job's `destination` summary — `{ type: 'presigned-put' }` or `{ type: 'saved', id, name? }`. Anything unrecognized reads as "no destination", never a throw. */
+function validateJobDestination(rec: Record<string, unknown> | null): JobDestinationSummary | null {
+  if (!rec) {
+    return null;
+  }
+  if (rec.type === 'presigned-put') {
+    return { type: 'presigned-put' };
+  }
+  if (rec.type === 'saved' && typeof rec.id === 'string') {
+    return { type: 'saved', id: rec.id, ...(typeof rec.name === 'string' ? { name: rec.name } : {}) };
+  }
+  return null;
 }
 
 /** Narrows a `delivery` object. An unrecognized `status` degrades to `'pending'` rather than throwing, for the same forward-compatibility reason {@link asErrorCode} falls back to `'internal'`. */
@@ -382,6 +492,128 @@ function validateJobDelivery(rec: Record<string, unknown>): JobDelivery {
     ...(typeof rec.deliveredAt === 'string' ? { deliveredAt: rec.deliveredAt } : {}),
     ...(typeof rec.statusCode === 'number' ? { statusCode: rec.statusCode } : {}),
     ...(typeof rec.error === 'string' ? { error: rec.error } : {}),
+    // Saved destinations only: where the bytes actually landed. Safe to echo
+    // (a bucket + key is not a credential), and the only way a caller learns
+    // the object name the server generated.
+    ...(typeof rec.key === 'string' ? { key: rec.key } : {}),
+    ...(typeof rec.bucket === 'string' ? { bucket: rec.bucket } : {}),
+    ...(typeof rec.localCopyDeleted === 'boolean' ? { localCopyDeleted: rec.localCopyDeleted } : {}),
+  };
+}
+
+// --- saved-destination response validation ---------------------------------
+
+function asBoolean(value: unknown, field: string, sourceUrl: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} response is missing boolean field "${field}"`);
+  }
+  return value;
+}
+
+function asNullableString(value: unknown, field: string, sourceUrl: string): string | null {
+  if (value === null) {
+    return null;
+  }
+  return asString(value, field, sourceUrl);
+}
+
+const STORAGE_PROVIDERS: readonly StorageProvider[] = ['aws-s3', 'cloudflare-r2', 'backblaze-b2', 's3-compatible'];
+
+/** Narrows a `provider` string. Unknown values are refused rather than widened — a provider we don't know is a response we can't reason about. */
+function asStorageProvider(value: unknown, sourceUrl: string): StorageProvider {
+  const found = STORAGE_PROVIDERS.find((provider) => provider === value);
+  if (!found) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned an unknown storage provider: ${String(value)}`);
+  }
+  return found;
+}
+
+/** Narrows a destination's `lastTest` record (`null` when it has never been tested). */
+function validateDestinationTest(value: unknown, sourceUrl: string): StorageDestinationTest | null {
+  const rec = asRecord(value);
+  if (!rec) {
+    return null;
+  }
+  const status = rec.status === 'ok' ? 'ok' : 'failed';
+  return {
+    status,
+    at: asString(rec.at, 'lastTest.at', sourceUrl),
+    ...(typeof rec.error === 'string' ? { error: rec.error } : {}),
+  };
+}
+
+/** Narrows one `StorageDestinationView`. Field by field, no casts — same convention as every other validator here. */
+function validateDestination(value: unknown, sourceUrl: string): StorageDestinationView {
+  const rec = asRecord(value);
+  if (!rec) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed storage destination`);
+  }
+  return {
+    id: asString(rec.id, 'id', sourceUrl),
+    name: asString(rec.name, 'name', sourceUrl),
+    provider: asStorageProvider(rec.provider, sourceUrl),
+    bucket: asString(rec.bucket, 'bucket', sourceUrl),
+    region: asNullableString(rec.region, 'region', sourceUrl),
+    endpoint: asNullableString(rec.endpoint, 'endpoint', sourceUrl),
+    forcePathStyle: asBoolean(rec.forcePathStyle, 'forcePathStyle', sourceUrl),
+    keyPrefix: asString(rec.keyPrefix, 'keyPrefix', sourceUrl),
+    accessKeyIdLast4: asString(rec.accessKeyIdLast4, 'accessKeyIdLast4', sourceUrl),
+    isDefault: asBoolean(rec.isDefault, 'isDefault', sourceUrl),
+    deleteAfterDelivery: asBoolean(rec.deleteAfterDelivery, 'deleteAfterDelivery', sourceUrl),
+    lastTest: validateDestinationTest(rec.lastTest, sourceUrl),
+    createdAt: asString(rec.createdAt, 'createdAt', sourceUrl),
+    updatedAt: asString(rec.updatedAt, 'updatedAt', sourceUrl),
+  };
+}
+
+function validateDestinationList(json: unknown, sourceUrl: string): StorageDestinationView[] {
+  const rec = asRecord(json);
+  const list = rec?.destinations;
+  if (!Array.isArray(list)) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned no destinations array`);
+  }
+  return list.map((entry) => validateDestination(entry, sourceUrl));
+}
+
+function validateDestinationEnvelope(json: unknown, sourceUrl: string): StorageDestinationView {
+  const rec = asRecord(json);
+  if (!rec) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed destination response`);
+  }
+  return validateDestination(rec.destination, sourceUrl);
+}
+
+function validateDestinationTestResult(json: unknown, sourceUrl: string): DestinationTestResult {
+  const rec = asRecord(json);
+  if (!rec) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed test result`);
+  }
+  const latencyMs = typeof rec.latencyMs === 'number' ? rec.latencyMs : 0;
+  return rec.ok === true
+    ? { ok: true, latencyMs }
+    : { ok: false, latencyMs, error: typeof rec.error === 'string' ? rec.error : 'destination test failed' };
+}
+
+/** Narrows a presign response. `headers` must be sent VERBATIM on the PUT — the signature covers them. */
+function validatePresignResponse(json: unknown, sourceUrl: string): DestinationPresignResponse {
+  const rec = asRecord(json);
+  if (!rec) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed presign response`);
+  }
+  const headers = asRecord(rec.headers) ?? {};
+  const narrowed: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (typeof value === 'string') {
+      narrowed[name] = value;
+    }
+  }
+  return {
+    url: asString(rec.url, 'url', sourceUrl),
+    method: 'PUT',
+    headers: narrowed,
+    key: asString(rec.key, 'key', sourceUrl),
+    bucket: asString(rec.bucket, 'bucket', sourceUrl),
+    expiresAt: asString(rec.expiresAt, 'expiresAt', sourceUrl),
   };
 }
 
@@ -456,8 +688,40 @@ async function requestJson<T>(
   return validate(json, url);
 }
 
-function isTerminal(status: JobStatus): boolean {
+/** Like {@link requestJson} for a route that answers `204 No Content` (there is no body to parse, and calling `.json()` on one throws). */
+async function requestVoid(fetchImpl: FetchLike, url: string, init: RequestInit): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, init);
+  } catch (cause) {
+    throw new SnapneditApiError('internal', 0, `network error calling ${url}: ${errMessage(cause)}`);
+  }
+  if (!response.ok) {
+    throw await parseErrorResponse(response, url);
+  }
+}
+
+function isTerminal(status: JobStatusResponse): boolean {
   return status.state === 'succeeded' || status.state === 'failed' || status.state === 'canceled';
+}
+
+/**
+ * True when there is nothing left to wait for: the job reached a terminal
+ * state AND, if it has a destination, the delivery has been settled.
+ *
+ * The second half matters for exactly one case — a CACHE HIT with a
+ * destination. `POST /jobs` answers those with a job that is already
+ * `succeeded` (the bytes existed) but whose `delivery` is still `pending`,
+ * because pushing them to your bucket is the worker's work and it hasn't run
+ * yet. Stopping at "terminal" there would hand back `delivery: pending` as if
+ * it were the outcome. Every ordinarily-processed job settles its delivery
+ * BEFORE going `succeeded`, so this never adds a poll for them.
+ */
+function isSettled(view: JobView): boolean {
+  if (!isTerminal(view)) {
+    return false;
+  }
+  return !(view.state === 'succeeded' && view.delivery?.status === 'pending');
 }
 
 export function createClient(options: CreateClientOptions): SnapneditClient {
@@ -552,6 +816,81 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     return requestJson(fetchImpl, url, { method: 'GET', headers: authHeaders(apiKey) }, validateJobView);
   }
 
+  // --- saved storage destinations -------------------------------------------
+
+  function destinationUrl(id: string, suffix = ''): string {
+    return apiUrl(`/destinations/${encodeURIComponent(id)}${suffix}`);
+  }
+
+  async function listDestinations(): Promise<StorageDestinationView[]> {
+    return requestJson(
+      fetchImpl,
+      apiUrl('/destinations'),
+      { method: 'GET', headers: authHeaders(apiKey) },
+      validateDestinationList,
+    );
+  }
+
+  async function createDestination(input: StorageDestinationInput): Promise<StorageDestinationView> {
+    return requestJson(
+      fetchImpl,
+      apiUrl('/destinations'),
+      {
+        method: 'POST',
+        headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+      validateDestinationEnvelope,
+    );
+  }
+
+  async function updateDestination(
+    id: string,
+    patch: StorageDestinationPatchInput,
+  ): Promise<StorageDestinationView> {
+    return requestJson(
+      fetchImpl,
+      destinationUrl(id),
+      {
+        method: 'PATCH',
+        headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      },
+      validateDestinationEnvelope,
+    );
+  }
+
+  async function deleteDestination(id: string): Promise<void> {
+    // 204 No Content — no body to validate, so this is the one api call that
+    // doesn't go through `requestJson`.
+    await requestVoid(fetchImpl, destinationUrl(id), { method: 'DELETE', headers: authHeaders(apiKey) });
+  }
+
+  async function testDestination(id: string): Promise<DestinationTestResult> {
+    return requestJson(
+      fetchImpl,
+      destinationUrl(id, '/test'),
+      { method: 'POST', headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' }, body: '{}' },
+      validateDestinationTestResult,
+    );
+  }
+
+  async function presignDestinationUpload(
+    id: string,
+    request: DestinationPresignRequest,
+  ): Promise<DestinationPresignResponse> {
+    return requestJson(
+      fetchImpl,
+      destinationUrl(id, '/presign'),
+      {
+        method: 'POST',
+        headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      },
+      validatePresignResponse,
+    );
+  }
+
   async function pollJob(jobId: string, opts: RunOptions): Promise<JobView> {
     const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -559,7 +898,7 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
 
     for (;;) {
       const status = await getJob(jobId);
-      if (isTerminal(status)) {
+      if (isSettled(status)) {
         return status;
       }
       const remaining = deadline - Date.now();
@@ -615,10 +954,16 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
       params,
       opts.destination !== undefined ? { destination: opts.destination } : {},
     );
-    const final: JobView = isTerminal(created.status)
-      ? { ...created.status, input: created.input, destination: created.destination, delivery: created.delivery }
-      : await pollJob(created.jobId, opts);
-    const finalStatus: JobStatus = final;
+    // A cache hit that ALSO has to be delivered comes back terminal
+    // (`succeeded`) with `delivery.status === 'pending'` — the server created a
+    // delivery-only job for it. Poll that through, or the caller would be told
+    // "delivered: pending" forever and never learn the outcome.
+    const settled =
+      isTerminal(created.status) && created.delivery?.status !== 'pending'
+        ? { ...created.status, input: created.input, destination: created.destination, delivery: created.delivery }
+        : await pollJob(created.jobId, opts);
+    const final: JobView = settled;
+    const finalStatus: JobStatusResponse = final;
 
     switch (finalStatus.state) {
       case 'succeeded': {
@@ -634,13 +979,24 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
         // caller is never silently left with nothing. `opts.download`
         // overrides either way.
         const delivered = final.delivery?.status === 'delivered';
-        const shouldDownload = opts.download ?? !(opts.destination !== undefined && delivered);
-        const base = { jobId: created.jobId, download: finalStatus.download, ...envelope };
-        if (!shouldDownload) {
+        // Only an EXPLICIT destination flips the default. An account default
+        // applied server-side does not: a caller who wrote `run(...)` and
+        // nothing else still expects bytes back, and their bucket copy is a
+        // bonus rather than a replacement.
+        const askedForDelivery = opts.destination !== undefined && opts.destination !== null;
+        const shouldDownload = opts.download ?? !(askedForDelivery && delivered);
+        const download = finalStatus.download;
+        const base = { jobId: created.jobId, download, ...envelope };
+        // `download === null` is the `deleteAfterDelivery` case: the bytes are
+        // in the caller's bucket and nowhere else, so there is nothing to
+        // fetch. Reporting `downloaded: false` (with the delivery record
+        // naming the bucket + key) beats throwing at a caller who asked for
+        // exactly this.
+        if (!shouldDownload || download === null) {
           return { downloaded: false, ...base };
         }
-        const { output, mime } = await downloadOutput(finalStatus.download);
-        return { downloaded: true, output, mime, ...base };
+        const { output, mime } = await downloadOutput(download);
+        return { downloaded: true, output, mime, ...base, download };
       }
       case 'failed':
         throw new SnapneditApiError(finalStatus.errorCode, 200, finalStatus.message);
@@ -721,5 +1077,19 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  return { run, upload, createJob, getJob, createDesign, createDesignPages, renderDesign };
+  return {
+    run,
+    upload,
+    createJob,
+    getJob,
+    listDestinations,
+    createDestination,
+    updateDestination,
+    deleteDestination,
+    testDestination,
+    presignDestinationUpload,
+    createDesign,
+    createDesignPages,
+    renderDesign,
+  };
 }
