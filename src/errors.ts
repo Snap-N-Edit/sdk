@@ -47,16 +47,20 @@ export class SnapneditTimeoutError extends Error {
  * into this zero-runtime-dependency, browser-safe package. See
  * `packages/sdk/src/client.ts`'s module doc comment for the full rationale.
  *
- * Kept in sync by hand with `packages/shared/src/errors.ts`. An error code
- * the api sends that isn't (yet) in this list still round-trips safely —
- * {@link asErrorCode} falls back to `'internal'` — so drift degrades
- * gracefully instead of throwing.
+ * Kept in sync by hand with `packages/shared/src/errors.ts` — and held to it
+ * by `test/errors.test.ts`, which imports the real `ERROR_CODES` (a runtime
+ * import is fine in a test; it never ships) and asserts the two lists are
+ * identical. An error code the api sends that isn't (yet) in this list still
+ * round-trips safely — {@link asErrorCode} falls back to `'internal'` — so
+ * drift degrades gracefully instead of throwing.
  */
-const KNOWN_ERROR_CODES = [
+export const KNOWN_ERROR_CODES = [
   'invalid_input',
   'unsupported_mime',
   'too_large',
   'not_found',
+  /** A job whose input was an external `inputUrl` could not be fetched (blocked address, redirect, timeout, non-2xx, oversized, or not an image). Terminal; credits refunded. */
+  'input_fetch_failed',
   'provider_failed',
   'provider_exhausted',
   'rate_limited',

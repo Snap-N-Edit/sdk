@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { createClient, SnapneditApiError, SnapneditTimeoutError } from '../src/index.js';
+import { createClient, SnapneditApiError, SnapneditTimeoutError, type JobDestination, type RunResult } from '../src/index.js';
 
 const baseUrl = 'http://localhost:8787';
 const apiKey = 'sk_test_123';
@@ -47,6 +47,20 @@ function authHeaderOf(init: RequestInit | undefined): string | null {
 
 function jsonBodyOf(init: RequestInit | undefined): unknown {
   return JSON.parse(String(init?.body ?? 'null'));
+}
+
+/**
+ * Narrows a `RunResult` to the downloaded branch. `run()` skips the download
+ * (and returns `{ downloaded: false }`, with no `output`) when a destination
+ * delivered the bytes to the caller's bucket instead — see the
+ * bring-your-own-storage suite at the bottom of this file — so a test that
+ * wants bytes has to say so.
+ */
+function downloadedBytes(result: RunResult): number[] {
+  if (!result.downloaded) {
+    throw new Error('expected run() to have downloaded the result, got { downloaded: false }');
+  }
+  return Array.from(result.output);
 }
 
 const inputBytes = new Uint8Array([1, 2, 3, 4, 5]);
@@ -107,7 +121,7 @@ describe('createClient().run — full success flow (upload -> job -> poll -> dow
     const client = createClient({ baseUrl, apiKey, fetch });
     const result = await client.run('remove-background', inputBytes, { pollIntervalMs: 1 });
 
-    expect(Array.from(result.output)).toEqual(Array.from(outputBytes));
+    expect(downloadedBytes(result)).toEqual(Array.from(outputBytes));
     expect(result.mime).toBe('image/png');
     expect(calls).toHaveLength(7);
 
@@ -207,7 +221,7 @@ describe('createClient().run — full success flow (upload -> job -> poll -> dow
     const client = createClient({ baseUrl, apiKey, fetch });
     const result = await client.run('generative-fill', inputBytes, { mask: maskBytes, params: { prompt: 'x' } });
 
-    expect(Array.from(result.output)).toEqual(Array.from(outputBytes));
+    expect(downloadedBytes(result)).toEqual(Array.from(outputBytes));
     expect(calls).toHaveLength(8);
     // Two independent uploads (two distinct POST /uploads calls, indices 0 and 3).
     expect(calls[0]?.url).toBe(`${baseUrl}/uploads`);
@@ -315,7 +329,16 @@ describe('lower-level client methods', () => {
     const client = createClient({ baseUrl, apiKey, fetch });
     const result = await client.createJob('upscale', 'asset-y', { factor: 2 });
 
-    expect(result).toEqual({ jobId: 'job-y', status: { state: 'queued' } });
+    expect(result).toEqual({
+      jobId: 'job-y',
+      status: { state: 'queued' },
+      // The bring-your-own-storage envelope is filled in even when the api
+      // (or, here, the scripted response) omits it entirely: an asset input,
+      // no destination, no delivery is the only thing its absence can mean.
+      input: { kind: 'asset' },
+      destination: null,
+      delivery: null,
+    });
   });
 
   test('getJob() never throws for a non-succeeded terminal status — just returns it (the throw-on-failure translation is run()-only)', async () => {
@@ -326,6 +349,247 @@ describe('lower-level client methods', () => {
     const client = createClient({ baseUrl, apiKey, fetch });
     const status = await client.getJob('job-z');
 
-    expect(status).toEqual({ state: 'failed', errorCode: 'invalid_input', message: 'bad input' });
+    expect(status).toEqual({
+      state: 'failed',
+      errorCode: 'invalid_input',
+      message: 'bad input',
+      input: { kind: 'asset' },
+      destination: null,
+      delivery: null,
+    });
+  });
+});
+
+/**
+ * BRING YOUR OWN STORAGE — an `inputUrl` the server fetches, a `destination`
+ * presigned PUT it delivers the result to, and the `input`/`destination`/
+ * `delivery` envelope every job response now carries.
+ */
+describe('bring your own storage', () => {
+  const destination: JobDestination = {
+    type: 'presigned-put',
+    url: 'https://bucket.example.com/out.png?X-Amz-Signature=sig',
+    headers: { 'content-type': 'image/png' },
+  };
+
+  test('createJob with a { url } input sends inputUrl (never inputAssetId)', async () => {
+    const { fetch, calls } = scriptedFetch([
+      () => jsonResponse(202, { jobId: 'job-u', status: { state: 'queued' }, input: { kind: 'url' }, destination: null, delivery: null }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.createJob('remove-background', { url: 'https://bucket.example.com/in.png' });
+
+    expect(jsonBodyOf(calls[0]?.init)).toEqual({
+      operation: 'remove-background',
+      inputUrl: 'https://bucket.example.com/in.png',
+      params: {},
+    });
+    expect(result.input).toEqual({ kind: 'url' });
+  });
+
+  test('createJob forwards opts.destination verbatim as the wire shape, and reports the echo-safe envelope back', async () => {
+    const { fetch, calls } = scriptedFetch([
+      () =>
+        jsonResponse(202, {
+          jobId: 'job-d',
+          status: { state: 'queued' },
+          input: { kind: 'asset' },
+          destination: { type: 'presigned-put' },
+          delivery: null,
+        }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.createJob('upscale', 'asset-y', { factor: '2' }, { destination });
+
+    expect(jsonBodyOf(calls[0]?.init)).toEqual({
+      operation: 'upscale',
+      inputAssetId: 'asset-y',
+      params: { factor: '2' },
+      destination,
+    });
+    // The api reports THAT there is a destination, never the url/headers.
+    expect(result.destination).toEqual({ type: 'presigned-put' });
+    expect(result.delivery).toBeNull();
+  });
+
+  test('an anonymous caller supplying inputUrl/destination gets a 403 -> SnapneditApiError { code: "forbidden", status: 403 }', async () => {
+    const { fetch } = scriptedFetch([
+      () =>
+        jsonResponse(403, {
+          error: { code: 'forbidden', message: 'inputUrl and destination require an API key or embed token' },
+        }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey: '', fetch });
+
+    let caught: unknown;
+    try {
+      await client.createJob('remove-background', { url: 'https://bucket.example.com/in.png' });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(SnapneditApiError);
+    const err = caught as SnapneditApiError;
+    expect(err.code).toBe('forbidden');
+    expect(err.status).toBe(403);
+  });
+
+  test('getJob surfaces the delivery record on a succeeded job', async () => {
+    const { fetch } = scriptedFetch([
+      () =>
+        jsonResponse(200, {
+          state: 'succeeded',
+          outputAssetId: 'asset-out',
+          download: { url: '/_local/get-out', expiresAt: 'x' },
+          input: { kind: 'url' },
+          destination: { type: 'presigned-put' },
+          delivery: { status: 'delivered', attempts: 1, statusCode: 200, deliveredAt: '2099-01-01T00:00:00.000Z' },
+        }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const view = await client.getJob('job-d');
+
+    expect(view.state).toBe('succeeded');
+    expect(view.input).toEqual({ kind: 'url' });
+    expect(view.destination).toEqual({ type: 'presigned-put' });
+    expect(view.delivery).toEqual({
+      status: 'delivered',
+      attempts: 1,
+      statusCode: 200,
+      deliveredAt: '2099-01-01T00:00:00.000Z',
+    });
+  });
+
+  test('run with a url input + destination: no upload, no download — just POST /jobs and one poll', async () => {
+    const { fetch, calls } = scriptedFetch([
+      // 0: POST /jobs — the ONLY write. No /uploads round-trip at all.
+      (url, init) => {
+        expect(url).toBe(`${baseUrl}/jobs`);
+        expect(jsonBodyOf(init)).toEqual({
+          operation: 'remove-background',
+          inputUrl: 'https://bucket.example.com/in.png',
+          params: {},
+          destination,
+        });
+        return jsonResponse(202, { jobId: 'job-b', status: { state: 'queued' }, input: { kind: 'url' }, destination: { type: 'presigned-put' }, delivery: null });
+      },
+      // 1: GET /jobs/job-b -> succeeded AND delivered
+      () =>
+        jsonResponse(200, {
+          state: 'succeeded',
+          outputAssetId: 'asset-out',
+          download: { url: '/_local/get-out', expiresAt: 'x' },
+          input: { kind: 'url' },
+          destination: { type: 'presigned-put' },
+          delivery: { status: 'delivered', attempts: 1, statusCode: 200 },
+        }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.run('remove-background', { url: 'https://bucket.example.com/in.png' }, {
+      destination,
+      pollIntervalMs: 1,
+    });
+
+    // Two calls total: create + one poll. Nothing uploaded, nothing downloaded.
+    expect(calls.map((c) => c.url)).toEqual([`${baseUrl}/jobs`, `${baseUrl}/jobs/job-b`]);
+    expect(result.downloaded).toBe(false);
+    expect(result.output).toBeUndefined();
+    expect(result.jobId).toBe('job-b');
+    expect(result.delivery).toEqual({ status: 'delivered', attempts: 1, statusCode: 200 });
+    // ...but the caller can still fetch the result themselves if they want to.
+    expect(result.download).toEqual({ url: '/_local/get-out', expiresAt: 'x' });
+  });
+
+  test('run downloads anyway when the delivery FAILED — the job still succeeded, so the caller is never left empty-handed', async () => {
+    const { fetch, calls } = scriptedFetch([
+      () =>
+        jsonResponse(200, {
+          jobId: 'job-f',
+          status: {
+            state: 'succeeded',
+            outputAssetId: 'asset-out',
+            download: { url: '/_local/get-out', expiresAt: 'x' },
+          },
+          input: { kind: 'url' },
+          destination: { type: 'presigned-put' },
+          delivery: { status: 'failed', attempts: 3, statusCode: 403, error: 'destination returned 403' },
+        }),
+      () => new Response(outputBytes, { status: 200, headers: { 'content-type': 'image/png' } }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.run('remove-background', { url: 'https://bucket.example.com/in.png' }, { destination });
+
+    expect(calls).toHaveLength(2);
+    expect(downloadedBytes(result)).toEqual(Array.from(outputBytes));
+    expect(result.delivery).toMatchObject({ status: 'failed', attempts: 3, statusCode: 403 });
+  });
+
+  test('opts.download overrides the default in both directions', async () => {
+    const succeededAndDelivered = {
+      jobId: 'job-o',
+      status: { state: 'succeeded', outputAssetId: 'asset-out', download: { url: '/_local/get-out', expiresAt: 'x' } },
+      input: { kind: 'asset' },
+      destination: { type: 'presigned-put' },
+      delivery: { status: 'delivered', attempts: 1 },
+    };
+
+    // download: true — delivered to the bucket AND pulled back here.
+    const forced = scriptedFetch([
+      () => jsonResponse(200, { assetId: 'asset-in', upload: { url: '/_local/put-in', expiresAt: 'x' } }),
+      () => noBody(204),
+      () => jsonResponse(200, { assetId: 'asset-in', contentHash: 'h', bytes: inputBytes.byteLength }),
+      () => jsonResponse(200, succeededAndDelivered),
+      () => new Response(outputBytes, { status: 200, headers: { 'content-type': 'image/png' } }),
+    ]);
+    const withDownload = await createClient({ baseUrl, apiKey, fetch: forced.fetch }).run(
+      'remove-background',
+      inputBytes,
+      { destination, download: true },
+    );
+    expect(downloadedBytes(withDownload)).toEqual(Array.from(outputBytes));
+
+    // download: false with NO destination — poll to completion, fetch nothing.
+    const skipped = scriptedFetch([
+      () => jsonResponse(200, { assetId: 'asset-in', upload: { url: '/_local/put-in', expiresAt: 'x' } }),
+      () => noBody(204),
+      () => jsonResponse(200, { assetId: 'asset-in', contentHash: 'h', bytes: inputBytes.byteLength }),
+      () =>
+        jsonResponse(200, {
+          jobId: 'job-s',
+          status: { state: 'succeeded', outputAssetId: 'asset-out', download: { url: '/_local/get-out', expiresAt: 'x' } },
+        }),
+    ]);
+    const withoutDownload = await createClient({ baseUrl, apiKey, fetch: skipped.fetch }).run(
+      'remove-background',
+      inputBytes,
+      { download: false },
+    );
+    expect(withoutDownload.downloaded).toBe(false);
+    expect(skipped.calls).toHaveLength(4);
+  });
+
+  test('a job that failed to fetch its inputUrl throws SnapneditApiError { code: "input_fetch_failed" }', async () => {
+    const { fetch } = scriptedFetch([
+      () => jsonResponse(202, { jobId: 'job-x', status: { state: 'queued' }, input: { kind: 'url' }, destination: null, delivery: null }),
+      () => jsonResponse(200, { state: 'failed', errorCode: 'input_fetch_failed', message: 'job failed: input_fetch_failed' }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+
+    let caught: unknown;
+    try {
+      await client.run('remove-background', { url: 'https://bucket.example.com/gone.png' }, { pollIntervalMs: 1 });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(SnapneditApiError);
+    expect((caught as SnapneditApiError).code).toBe('input_fetch_failed');
   });
 });

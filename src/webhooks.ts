@@ -28,15 +28,39 @@
 export type WebhookEventType = 'job.succeeded' | 'job.failed';
 
 /**
+ * The bring-your-own-storage envelope every job event carries: which kind of
+ * input the job had, whether it had a delivery destination, and how that
+ * delivery went. Mirrors what `GET /jobs/:id` reports — and, like that
+ * endpoint, never the input url, the destination url or its headers, which
+ * are bearer credentials for the caller's own bucket.
+ */
+export interface WebhookJobEnvelope {
+  input: { kind: 'asset' | 'url' };
+  destination: { type: 'presigned-put' } | null;
+  delivery: {
+    status: 'pending' | 'delivered' | 'failed';
+    attempts: number;
+    deliveredAt?: string;
+    statusCode?: number;
+    error?: string;
+  } | null;
+}
+
+/**
  * The `data` object inside a delivery body, discriminated by `status`. For a
  * `job.succeeded` event it carries the output asset (and an optional signed
  * `download` URL); for `job.failed` it carries the machine-readable
  * `errorCode` plus a human `message`. `operation` is the operation id as an
- * opaque string (e.g. `'remove-background'`).
+ * opaque string (e.g. `'remove-background'`). Both carry the
+ * {@link WebhookJobEnvelope}.
+ *
+ * A `job.succeeded` event with `delivery.status === 'failed'` is a real
+ * combination and not a contradiction: the job ran fine, only the PUT into
+ * the caller's bucket did not — the result is still at `download`.
  */
 export type WebhookEventData =
-  | { jobId: string; operation: string; status: 'succeeded'; outputAssetId: string; download?: string }
-  | { jobId: string; operation: string; status: 'failed'; errorCode: string; message: string };
+  | ({ jobId: string; operation: string; status: 'succeeded'; outputAssetId: string; download?: string } & WebhookJobEnvelope)
+  | ({ jobId: string; operation: string; status: 'failed'; errorCode: string; message: string } & WebhookJobEnvelope);
 
 /**
  * The full JSON body POSTed to a developer endpoint: `{ id, type, created,

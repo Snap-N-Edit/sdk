@@ -33,12 +33,16 @@ const client = createClient({
 const input = new Uint8Array(await file.arrayBuffer());
 
 // Upload → POST /jobs → poll GET /jobs/:id → download, in one call.
-const { output, mime } = await client.run('remove-background', input, {
-  mime: 'image/png',
-});
+const result = await client.run('remove-background', input, { mime: 'image/png' });
 
-await writeFile('out.png', output); // `output` is a Uint8Array; `mime` the result's type
+if (result.downloaded) {
+  await writeFile('out.png', result.output); // a Uint8Array; `result.mime` is its type
+}
 ```
+
+(`downloaded` is `true` for every ordinary run — it is `false` only when you asked
+the server to deliver the bytes elsewhere; see
+[Bring your own storage](#bring-your-own-storage).)
 
 `run()` accepts a `Uint8Array` or a `Blob`/`File`. Options:
 
@@ -49,11 +53,18 @@ await writeFile('out.png', output); // `output` is a Uint8Array; `mime` the resu
 | `mime` | MIME type of the input (inferred from `Blob.type` when omitted). |
 | `pollIntervalMs` | Delay between status polls. Default `1000`. |
 | `timeoutMs` | Total polling budget before `SnapneditTimeoutError`. Default `120000`. |
+| `destination` | A presigned PUT the server delivers the result to — see [Bring your own storage](#bring-your-own-storage). |
+| `download` | Whether `run()` fetches the result bytes itself. Defaults to `true`, except when `destination` delivered them (see below). |
+
+`run()` resolves to a result discriminated by `downloaded`: the usual
+`{ downloaded: true, output, mime, jobId, download, input, destination, delivery }`,
+or `{ downloaded: false, ... }` when the download was skipped. Under `strict`
+TypeScript, narrow with `if (result.downloaded)` before touching `output`.
 
 A mask-guided run:
 
 ```ts
-const { output } = await client.run('magic-eraser', photoBytes, {
+const result = await client.run('magic-eraser', photoBytes, {
   mime: 'image/png',
   mask: maskBytes, // white = erase
 });
@@ -85,7 +96,63 @@ if (current.state === 'succeeded') {
 `getJob()` returns the job state rather than throwing on `failed`/`canceled`:
 `{ state: 'queued' }`, `{ state: 'processing', startedAt }`,
 `{ state: 'succeeded', outputAssetId, download }`,
-`{ state: 'failed', errorCode, message }`, or `{ state: 'canceled' }`.
+`{ state: 'failed', errorCode, message }`, or `{ state: 'canceled' }` — each
+alongside the `input` / `destination` / `delivery` fields described below.
+
+## Bring your own storage
+
+Two optional pieces let the bytes skip your process entirely: the server can
+**fetch the input** from a URL you name, and **PUT the result** into a bucket you
+name. Either can be used on its own; together, nothing but JSON crosses the wire
+between you and the API.
+
+```ts
+const result = await client.run('remove-background', { url: presignedGetUrl }, {
+  destination: {
+    type: 'presigned-put',
+    url: presignedPutUrl,                        // your bucket, your signature
+    headers: { 'content-type': 'image/png' },    // whatever the signature covers
+  },
+});
+
+result.downloaded;  // false — the bytes went straight to your bucket
+result.delivery;    // { status: 'delivered', attempts: 1, statusCode: 200, deliveredAt }
+result.download;    // still a presigned URL on our side, if you want a copy
+```
+
+- **Input**: pass `{ url }` in place of the bytes to `run()`, or to `createJob()`
+  (which sends `inputUrl` instead of `inputAssetId`). There is no upload at all.
+  Masks stay inline — there is no URL form for `opts.mask`.
+- **Output**: `opts.destination` is the wire type verbatim,
+  `{ type: 'presigned-put', url, headers? }`. Allowed headers are `content-type`,
+  `cache-control`, `content-disposition` and `x-amz-*` / `x-goog-*` / `x-ms-*`
+  (16 max); anything else is a `400` rather than a silent drop.
+- **No CORS, ever.** Both transfers are server-to-bucket. No browser is involved,
+  so no bucket CORS configuration is needed — and neither URL is ever echoed back
+  by the API, logged, or included in a webhook, because a presigned URL is a
+  bearer credential for your bucket. Mint them short-lived.
+- **Downloading.** With a destination, `run()` skips the download by default —
+  re-fetching bytes that are already in your bucket would defeat the point. Pass
+  `download: true` to get both, or `download: false` on an ordinary run to just
+  wait for completion. `result.download` is always there either way.
+
+Both features require an API key (or an embed token): an anonymous caller gets
+`403 forbidden`.
+
+### Failure semantics
+
+| What failed | Job | What you get |
+| --- | --- | --- |
+| The input URL (blocked host, redirect, timeout, non-2xx, too large, not an image) | `failed`, credits refunded | `SnapneditApiError` with `code: 'input_fetch_failed'` |
+| The delivery PUT (after 3 attempts) | **still `succeeded`** | `delivery.status === 'failed'` with `statusCode`/`error`; `run()` downloads the bytes for you instead |
+
+The input fetch is deliberately strict: https only, no redirects, no private /
+loopback / link-local / metadata addresses, a 30-second timeout, and the same
+size ceiling as a direct upload.
+
+Job and webhook payloads both carry the same three fields — `input: { kind }`,
+`destination: { type } | null` and `delivery | null` — so a webhook receiver sees
+the delivery outcome without polling.
 
 ## Operations
 
@@ -149,9 +216,9 @@ try {
 } catch (err) {
   if (err instanceof SnapneditApiError) {
     // err.code   — typed ErrorCode: 'invalid_input' | 'unsupported_mime' | 'too_large' |
-    //              'not_found' | 'provider_failed' | 'provider_exhausted' | 'rate_limited' |
-    //              'bot_check_failed' | 'unauthorized' | 'forbidden' | 'payment_required' |
-    //              'internal'
+    //              'not_found' | 'input_fetch_failed' | 'provider_failed' |
+    //              'provider_exhausted' | 'rate_limited' | 'bot_check_failed' |
+    //              'unauthorized' | 'forbidden' | 'payment_required' | 'internal'
     // err.status — the HTTP status that produced it (0 for a network failure)
     if (err.code === 'payment_required') await topUpCredits();
   } else if (err instanceof SnapneditTimeoutError) {
@@ -187,6 +254,8 @@ const event = JSON.parse(raw) as WebhookDeliveryBody;
 // event.type: 'job.succeeded' | 'job.failed'
 // event.data: { jobId, operation, status: 'succeeded', outputAssetId, download? }
 //           | { jobId, operation, status: 'failed', errorCode, message }
+// ...each also carrying { input: { kind }, destination, delivery } — see
+// "Bring your own storage" above.
 ```
 
 `verifyWebhookSignature` recomputes the HMAC-SHA256 of `` `${t}.${rawBody}` `` and

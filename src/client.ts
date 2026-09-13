@@ -20,6 +20,14 @@
  * for the same reason.
  */
 import type { ErrorCode, JobStatus, OperationId, SignedUrl } from '@snapnedit/shared';
+// The bring-your-own-storage wire types come from the `@snapnedit/shared`
+// SUBPATH (`/jobRequest`), not its barrel — and, like every other import in
+// this file, `import type` only. `jobRequest.ts` is itself browser-safe (its
+// only import is `zod`), but importing a *value* from it would still put zod
+// in this package's runtime graph; taking the types alone keeps the "zero
+// runtime dependencies" promise intact while guaranteeing the SDK and the api
+// describe a destination with literally the same type.
+import type { JobDelivery, JobDestination, JobInputKind } from '@snapnedit/shared/jobRequest';
 import type { DesignDocument, DesignSpec, MultiPageDesignSpec, RenderDesignInput } from './design.js';
 import { asErrorCode, SnapneditApiError, SnapneditTimeoutError } from './errors.js';
 
@@ -38,6 +46,46 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 /** Raw bytes a caller may hand the SDK: works identically in Node and the browser. */
 export type BinaryInput = Uint8Array | Blob;
 
+/**
+ * BRING YOUR OWN STORAGE, input half: an image that is ALREADY in the
+ * caller's own bucket, named by a url the SERVER fetches — so the bytes never
+ * pass through the caller's process at all, and no `POST /uploads` happens.
+ *
+ * Use a short-lived presigned GET (or any publicly reachable https url). The
+ * api accepts https only, refuses private/loopback/link-local/metadata
+ * addresses, follows no redirects, times out at 30s and stops reading at the
+ * same size ceiling `POST /uploads` enforces. A fetch that fails for any of
+ * those reasons is a terminal `input_fetch_failed` job failure with the
+ * credits refunded.
+ *
+ * Requires an API key (or embed token): an anonymous caller supplying one
+ * gets a `403 forbidden`.
+ */
+export interface JobUrlInput {
+  url: string;
+}
+
+/** A job's input: an uploaded asset id (`upload()`'s `assetId`) or an external {@link JobUrlInput}. */
+export type JobInputRef = string | JobUrlInput;
+
+/**
+ * The bring-your-own-storage half of a job's representation, present on
+ * {@link CreateJobResult}, {@link JobView} and {@link RunResult}.
+ *
+ * Note what is NOT here: the input url, the destination url and the
+ * destination headers. The api never echoes those back — a presigned url is a
+ * bearer credential for the caller's bucket — so a caller only learns WHICH
+ * KIND of input the job had, THAT a destination exists, and how delivery went.
+ */
+export interface JobEnvelope {
+  input: { kind: JobInputKind };
+  destination: { type: 'presigned-put' } | null;
+  delivery: JobDelivery | null;
+}
+
+/** What `GET /jobs/:id` returns: the job's {@link JobStatus} plus its {@link JobEnvelope}. */
+export type JobView = JobStatus & JobEnvelope;
+
 export interface CreateClientOptions {
   /** Origin of the snapnedit api, e.g. `https://api.snapnedit.com` or `http://localhost:8787`. No trailing slash required. */
   baseUrl: string;
@@ -47,29 +95,84 @@ export interface CreateClientOptions {
   fetch?: FetchLike;
 }
 
-export interface RunOptions {
+/** Options for {@link SnapneditClient.createJob}. */
+export interface CreateJobOptions {
+  /**
+   * BRING YOUR OWN STORAGE, output half: a presigned PUT the server delivers
+   * the RESULT bytes to, so they never round-trip through the caller. The
+   * wire type verbatim — `{ type: 'presigned-put', url, headers? }`.
+   *
+   * `headers` are the ones the presigned signature requires; only
+   * `content-type`, `cache-control`, `content-disposition` and `x-amz-*` /
+   * `x-goog-*` / `x-ms-*` are accepted (at most 16), anything else is a `400`.
+   * Requires an API key (or embed token) — anonymous gets a `403 forbidden`.
+   */
+  destination?: JobDestination;
+}
+
+export interface RunOptions extends CreateJobOptions {
   /** Extra operation params (e.g. `{ prompt: '...' }` for `generative-fill`). `maskAssetId` is set automatically when `mask` is provided — do not set it here. */
   params?: Record<string, unknown>;
-  /** A second image to upload for mask-guided operations (`magic-eraser`, `generative-fill`). */
+  /** A second image to upload for mask-guided operations (`magic-eraser`, `generative-fill`). Masks are asset-only — there is no url form. */
   mask?: BinaryInput;
-  /** MIME type of `input` (and, if `mask` is a `Uint8Array`, of `mask` too). Inferred from `Blob.type` when omitted; defaults to `application/octet-stream`. */
+  /** MIME type of `input` (and, if `mask` is a `Uint8Array`, of `mask` too). Inferred from `Blob.type` when omitted; defaults to `application/octet-stream`. Ignored for a {@link JobUrlInput}, whose type the server sniffs from the fetched bytes. */
   mime?: string;
   /** Delay between `GET /jobs/:id` polls. Default 1000ms. */
   pollIntervalMs?: number;
   /** Total budget for polling before {@link SnapneditTimeoutError} is thrown. Default 120_000ms. */
   timeoutMs?: number;
+  /**
+   * Whether `run()` should download the result bytes itself.
+   *
+   * Defaults to TRUE for an ordinary run, and to FALSE when a
+   * {@link CreateJobOptions.destination} was given AND the server reports
+   * `delivery.status === 'delivered'` — the whole point of a destination is
+   * that the bytes go straight to the caller's bucket, so pulling them back
+   * through this process would undo it. A delivery that FAILED still
+   * downloads by default, so a caller is never left empty-handed.
+   *
+   * Set it explicitly to override either way: `true` to get the bytes as well
+   * as the delivery, `false` to skip the download and just poll to completion.
+   * The result always carries `download` (a presigned url) so a skipped
+   * download can be performed later regardless.
+   */
+  download?: boolean;
 }
 
-export interface RunResult {
+/** Fields every {@link RunResult} carries, downloaded or not. */
+interface RunResultBase extends JobEnvelope {
+  /** Id of the job that produced this result. */
+  jobId: string;
+  /** Presigned url for the result, whether or not `run()` downloaded it. */
+  download: SignedUrl;
+}
+
+/** A {@link RunResult} whose bytes were downloaded (the default). */
+export interface RunDownloadedResult extends RunResultBase {
+  downloaded: true;
   output: Uint8Array;
   mime: string;
 }
+
+/** A {@link RunResult} whose download was skipped — see {@link RunOptions.download}. The bytes are in the caller's bucket (`delivery`) and/or at `download.url`. */
+export interface RunDeliveredResult extends RunResultBase {
+  downloaded: false;
+  output?: undefined;
+  mime?: undefined;
+}
+
+/**
+ * What `run()` resolves to. Discriminated by `downloaded`: the ordinary path
+ * is `{ downloaded: true, output, mime, ... }`, and a delivered-to-your-bucket
+ * run is `{ downloaded: false, ... }` with no bytes attached.
+ */
+export type RunResult = RunDownloadedResult | RunDeliveredResult;
 
 export interface UploadResult {
   assetId: string;
 }
 
-export interface CreateJobResult {
+export interface CreateJobResult extends JobEnvelope {
   jobId: string;
   status: JobStatus;
 }
@@ -81,14 +184,30 @@ export interface SnapneditClient {
    * Throws {@link SnapneditApiError} on a failed job or any non-2xx api
    * response (payment_required for a 402), or {@link SnapneditTimeoutError}
    * if polling exceeds `opts.timeoutMs`.
+   *
+   * Bring your own storage: pass `{ url }` as `input` to have the SERVER
+   * fetch the image (no upload step at all), and/or `opts.destination` to
+   * have it PUT the result straight into your bucket — in which case the
+   * download is skipped by default and the returned {@link RunResult} is
+   * `{ downloaded: false, delivery, download, ... }`. See
+   * {@link RunOptions.download}.
    */
-  run(operation: OperationId, input: BinaryInput, opts?: RunOptions): Promise<RunResult>;
+  run(operation: OperationId, input: BinaryInput | JobUrlInput, opts?: RunOptions): Promise<RunResult>;
   /** Uploads one asset: `POST /uploads` -> `PUT <presigned url>` -> `POST /uploads/:id/confirm`. */
   upload(bytes: BinaryInput, mime?: string): Promise<UploadResult>;
-  /** `POST /jobs`. `status` may already be terminal (`succeeded`) on a cache hit. */
-  createJob(operation: OperationId, inputAssetId: string, params?: Record<string, unknown>): Promise<CreateJobResult>;
-  /** `GET /jobs/:id`. Non-throwing on a non-terminal or `failed`/`canceled` status — just returns it. */
-  getJob(jobId: string): Promise<JobStatus>;
+  /**
+   * `POST /jobs`. `input` is an uploaded asset id or a `{ url }` the server
+   * fetches; `opts.destination` is a presigned PUT for the result. `status`
+   * may already be terminal (`succeeded`) on a cache hit.
+   */
+  createJob(
+    operation: OperationId,
+    input: JobInputRef,
+    params?: Record<string, unknown>,
+    opts?: CreateJobOptions,
+  ): Promise<CreateJobResult>;
+  /** `GET /jobs/:id`. Non-throwing on a non-terminal or `failed`/`canceled` status — just returns it, with the `input`/`destination`/`delivery` envelope. */
+  getJob(jobId: string): Promise<JobView>;
   /**
    * CREATE a design from a declarative {@link DesignSpec} — `POST /designs`.
    * Returns the compiled editor `Document` (opaque; feed it to {@link renderDesign}
@@ -123,6 +242,16 @@ function resolvePresignedUrl(baseUrl: string, maybeRelative: string): string {
 
 function isBlob(input: BinaryInput): input is Blob {
   return typeof Blob !== 'undefined' && input instanceof Blob;
+}
+
+/**
+ * True for the `{ url }` form of a job input. Checked structurally (a plain
+ * object with a string `url`) rather than by excluding `Uint8Array`/`Blob`,
+ * so it stays correct in a runtime where one of those globals is polyfilled
+ * or absent — and a `Blob`, which has no `url` property, can never match.
+ */
+function isUrlInput(input: BinaryInput | JobInputRef): input is JobUrlInput {
+  return typeof input === 'object' && input !== null && typeof (input as { url?: unknown }).url === 'string';
 }
 
 function byteLength(input: BinaryInput): number {
@@ -220,12 +349,61 @@ function validateJobStatus(json: unknown, sourceUrl: string): JobStatus {
   }
 }
 
-function validateCreateJobResponse(json: unknown, sourceUrl: string): { jobId: string; status: JobStatus } {
+/**
+ * Narrows the bring-your-own-storage envelope (`input` / `destination` /
+ * `delivery`) off a job response.
+ *
+ * Deliberately LENIENT where the rest of this file is strict: an api that
+ * predates bring-your-own-storage sends none of these keys, and a plain
+ * upload-and-download caller must not start throwing against such a
+ * deployment. A missing envelope therefore reads as the only thing it can
+ * mean — an asset input, no destination, no delivery — while a PRESENT one is
+ * still narrowed field by field, never cast.
+ */
+function validateJobEnvelope(rec: Record<string, unknown>): JobEnvelope {
+  const input = asRecord(rec.input);
+  const kind: JobInputKind = input?.kind === 'url' ? 'url' : 'asset';
+  const destination = asRecord(rec.destination);
+  const delivery = asRecord(rec.delivery);
+  return {
+    input: { kind },
+    destination: destination?.type === 'presigned-put' ? { type: 'presigned-put' } : null,
+    delivery: delivery ? validateJobDelivery(delivery) : null,
+  };
+}
+
+/** Narrows a `delivery` object. An unrecognized `status` degrades to `'pending'` rather than throwing, for the same forward-compatibility reason {@link asErrorCode} falls back to `'internal'`. */
+function validateJobDelivery(rec: Record<string, unknown>): JobDelivery {
+  const status =
+    rec.status === 'delivered' || rec.status === 'failed' || rec.status === 'pending' ? rec.status : 'pending';
+  return {
+    status,
+    attempts: typeof rec.attempts === 'number' ? rec.attempts : 0,
+    ...(typeof rec.deliveredAt === 'string' ? { deliveredAt: rec.deliveredAt } : {}),
+    ...(typeof rec.statusCode === 'number' ? { statusCode: rec.statusCode } : {}),
+    ...(typeof rec.error === 'string' ? { error: rec.error } : {}),
+  };
+}
+
+/** `GET /jobs/:id`: the status union and the envelope, spread into one object by the api. */
+function validateJobView(json: unknown, sourceUrl: string): JobView {
+  const rec = asRecord(json);
+  if (!rec) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed job status`);
+  }
+  return { ...validateJobStatus(rec, sourceUrl), ...validateJobEnvelope(rec) };
+}
+
+function validateCreateJobResponse(json: unknown, sourceUrl: string): CreateJobResult {
   const rec = asRecord(json);
   if (!rec) {
     throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed job-create response`);
   }
-  return { jobId: asString(rec.jobId, 'jobId', sourceUrl), status: validateJobStatus(rec.status, sourceUrl) };
+  return {
+    jobId: asString(rec.jobId, 'jobId', sourceUrl),
+    status: validateJobStatus(rec.status, sourceUrl),
+    ...validateJobEnvelope(rec),
+  };
 }
 
 /** `{ error: { code, message } }` — the uniform error body every api route sends on a non-2xx (see `apps/api/src/http-errors.ts`'s `sendError`). */
@@ -344,28 +522,37 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
 
   async function createJob(
     operation: OperationId,
-    inputAssetId: string,
+    input: JobInputRef,
     params: Record<string, unknown> = {},
+    opts: CreateJobOptions = {},
   ): Promise<CreateJobResult> {
     const url = apiUrl('/jobs');
+    // Exactly one of `inputAssetId` / `inputUrl` — the api rejects a body
+    // carrying both or neither, so the ref decides which key is emitted.
+    const inputBody = isUrlInput(input) ? { inputUrl: input.url } : { inputAssetId: input };
     return requestJson(
       fetchImpl,
       url,
       {
         method: 'POST',
         headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation, inputAssetId, params }),
+        body: JSON.stringify({
+          operation,
+          ...inputBody,
+          params,
+          ...(opts.destination !== undefined ? { destination: opts.destination } : {}),
+        }),
       },
       validateCreateJobResponse,
     );
   }
 
-  async function getJob(jobId: string): Promise<JobStatus> {
+  async function getJob(jobId: string): Promise<JobView> {
     const url = apiUrl(`/jobs/${jobId}`);
-    return requestJson(fetchImpl, url, { method: 'GET', headers: authHeaders(apiKey) }, validateJobStatus);
+    return requestJson(fetchImpl, url, { method: 'GET', headers: authHeaders(apiKey) }, validateJobView);
   }
 
-  async function pollJob(jobId: string, opts: RunOptions): Promise<JobStatus> {
+  async function pollJob(jobId: string, opts: RunOptions): Promise<JobView> {
     const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const deadline = Date.now() + timeoutMs;
@@ -385,7 +572,7 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     }
   }
 
-  async function downloadOutput(signed: SignedUrl): Promise<RunResult> {
+  async function downloadOutput(signed: SignedUrl): Promise<{ output: Uint8Array; mime: string }> {
     const url = resolvePresignedUrl(baseUrl, signed.url);
     let response: Response;
     try {
@@ -401,9 +588,14 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     return { output: new Uint8Array(buf), mime };
   }
 
-  async function run(operation: OperationId, input: BinaryInput, opts: RunOptions = {}): Promise<RunResult> {
-    const inputMime = opts.mime ?? defaultMime(input);
-    const { assetId: inputAssetId } = await upload(input, inputMime);
+  async function run(
+    operation: OperationId,
+    input: BinaryInput | JobUrlInput,
+    opts: RunOptions = {},
+  ): Promise<RunResult> {
+    // A `{ url }` input skips the upload entirely — the server fetches those
+    // bytes itself. Anything else is uploaded first, exactly as before.
+    const inputRef: JobInputRef = isUrlInput(input) ? input : (await upload(input, opts.mime ?? defaultMime(input))).assetId;
 
     const params: Record<string, unknown> = { ...(opts.params ?? {}) };
     if (opts.mask !== undefined) {
@@ -417,12 +609,39 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
       params.maskAssetId = maskAssetId;
     }
 
-    const created = await createJob(operation, inputAssetId, params);
-    const finalStatus = isTerminal(created.status) ? created.status : await pollJob(created.jobId, opts);
+    const created = await createJob(
+      operation,
+      inputRef,
+      params,
+      opts.destination !== undefined ? { destination: opts.destination } : {},
+    );
+    const final: JobView = isTerminal(created.status)
+      ? { ...created.status, input: created.input, destination: created.destination, delivery: created.delivery }
+      : await pollJob(created.jobId, opts);
+    const finalStatus: JobStatus = final;
 
     switch (finalStatus.state) {
-      case 'succeeded':
-        return downloadOutput(finalStatus.download);
+      case 'succeeded': {
+        const envelope: JobEnvelope = {
+          input: final.input,
+          destination: final.destination,
+          delivery: final.delivery,
+        };
+        // A destination whose delivery SUCCEEDED is the one case where
+        // pulling the bytes back through this process would defeat the
+        // purpose — they are already in the caller's bucket. Everything else
+        // (no destination at all, or a delivery that failed) downloads, so a
+        // caller is never silently left with nothing. `opts.download`
+        // overrides either way.
+        const delivered = final.delivery?.status === 'delivered';
+        const shouldDownload = opts.download ?? !(opts.destination !== undefined && delivered);
+        const base = { jobId: created.jobId, download: finalStatus.download, ...envelope };
+        if (!shouldDownload) {
+          return { downloaded: false, ...base };
+        }
+        const { output, mime } = await downloadOutput(finalStatus.download);
+        return { downloaded: true, output, mime, ...base };
+      }
       case 'failed':
         throw new SnapneditApiError(finalStatus.errorCode, 200, finalStatus.message);
       case 'canceled':
