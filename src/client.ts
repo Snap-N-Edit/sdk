@@ -99,6 +99,12 @@ export interface JobEnvelope {
    */
   destination: JobDestinationSummary | null;
   delivery: JobDelivery | null;
+  /** Credits actually debited for this job: 0 for free operations, cache hits, delivery-only rows and website sessions. */
+  creditCost: number;
+  /** True when the job was satisfied from the result cache (no model run, no debit). */
+  cached: boolean;
+  /** True when the job only delivered an already-cached result to a destination. */
+  deliveryOnly: boolean;
 }
 
 /**
@@ -110,6 +116,104 @@ export interface JobEnvelope {
  * with `if (job.state === 'succeeded' && job.download)` before dereferencing.
  */
 export type JobView = JobStatusResponse & JobEnvelope;
+
+/**
+ * USAGE TRACKING — the shapes `GET /usage` speaks.
+ *
+ * Declared here rather than imported from `@snapnedit/shared`, unlike the
+ * job/destination wire types above: those live in `shared/jobRequest.ts`,
+ * which is browser-safe and importable `import type`; the usage contract has
+ * no such subpath. Restating it costs a hand-written validator
+ * ({@link validateUsageReport}) — which this client would need either way,
+ * since it validates every response by hand rather than trusting a cast.
+ */
+export type UsageGroupBy = 'day' | 'key' | 'origin' | 'operation' | 'source';
+
+/**
+ * Where a job came from, as the api persists it: an `sk_` key (`api`), an
+ * embedded editor session (`embed`), a signed-in website visitor (`session`)
+ * or a visitor with no account (`anonymous`). The last two are free.
+ */
+export type UsageSource = 'api' | 'embed' | 'session' | 'anonymous';
+
+/** Filters for {@link SnapneditClient.getUsage}. All optional — the api defaults to the last 30 days grouped by day. */
+export interface UsageQuery {
+  /** Inclusive `YYYY-MM-DD`. */
+  from?: string;
+  /** Inclusive `YYYY-MM-DD`. A range wider than 366 days is refused with `invalid_input`. */
+  to?: string;
+  /** How the `series` is bucketed. Defaults to `'day'`. */
+  groupBy?: UsageGroupBy;
+  /** Restrict to one API key, by id. */
+  keyId?: string;
+  /** Restrict to one embed origin (a site origin, or `native:<app id>`). */
+  origin?: string;
+  /** Restrict to one operation id. */
+  operation?: string;
+  /** Restrict to one {@link UsageSource}. */
+  source?: UsageSource;
+}
+
+/**
+ * The series key the api uses for a bucket with no value for the grouped
+ * dimension — a website job has no api key, an `sk_` job has no origin.
+ */
+export const USAGE_UNATTRIBUTED = 'none';
+
+/** Account-wide roll-up for the selected range and filters. */
+export interface UsageTotals {
+  jobs: number;
+  credits: number;
+  cacheHits: number;
+  free: number;
+  failed: number;
+  delivered: number;
+  deliveryFailed: number;
+  sessions: number;
+  activeSessions: number;
+}
+
+/** One bucket of the series — a day, a key, an origin, an operation or a source, per `groupBy`. */
+export interface UsageSeriesPoint {
+  key: string;
+  label: string;
+  jobs: number;
+  credits: number;
+  cacheHits: number;
+  free: number;
+  failed: number;
+  delivered: number;
+  deliveryFailed: number;
+  sessions: number;
+}
+
+/** One of the account's API keys, with today's spend against its daily cap (`null` = uncapped). */
+export interface UsageKeyRow {
+  id: string;
+  name: string;
+  kind: 'secret' | 'publishable';
+  dailyCreditLimit: number | null;
+  usedToday: number;
+}
+
+/**
+ * The `GET /usage` body.
+ *
+ * `range` echoes the resolved window as ISO INSTANTS (`from` at the start of
+ * its day, `to` at the end), not the `YYYY-MM-DD` the query takes — take
+ * `.slice(0, 10)` for the day.
+ *
+ * `keys` is `[]` for an embed-token caller: the api omits the roster entirely
+ * for a credential that may not enumerate the account's keys, and this client
+ * normalizes the absence to an empty list rather than `undefined`.
+ */
+export interface UsageReport {
+  range: { from: string; to: string };
+  groupBy: UsageGroupBy;
+  totals: UsageTotals;
+  series: UsageSeriesPoint[];
+  keys: UsageKeyRow[];
+}
 
 export interface CreateClientOptions {
   /** Origin of the snapnedit api, e.g. `https://api.snapnedit.com` or `http://localhost:8787`. No trailing slash required. */
@@ -270,6 +374,26 @@ export interface SnapneditClient {
   // job (`destination: { type: 'saved', id }`) — or marked as your default,
   // after which every job you create is delivered to them with no
   // `destination` field at all. See https://snapnedit.com/docs/storage-destinations.
+
+  /**
+   * `GET /usage` — what this account ran, what it cost, and where it came
+   * from, over a date range you choose.
+   *
+   * Everything is optional: `getUsage()` is the last 30 days grouped by day.
+   * `groupBy` picks the bucketing; `keyId`/`origin`/`operation`/`source`
+   * narrow WHAT is counted before it is bucketed — so
+   * `getUsage({ source: 'embed', groupBy: 'origin' })` reads "embed credits
+   * per customer site".
+   *
+   * `totals` is the roll-up under the same filters. `keys` is the account's
+   * key roster with today's spend against each daily cap — the one part of
+   * the response that is about NOW rather than about the range, and the only
+   * way to see a cap you are about to hit.
+   *
+   * Throws `SnapneditApiError` with code `invalid_input` for a range the api
+   * refuses (backwards, or wider than 366 days).
+   */
+  getUsage(query?: UsageQuery): Promise<UsageReport>;
 
   /** `GET /destinations` — every saved destination on the account, credential-free (only the access key's last 4 characters are ever returned). */
   /**
@@ -476,6 +600,11 @@ function validateJobEnvelope(rec: Record<string, unknown>): JobEnvelope {
     input: { kind },
     destination: validateJobDestination(asRecord(rec.destination)),
     delivery: delivery ? validateJobDelivery(delivery) : null,
+    // Attribution facts (added with usage tracking). Older servers omit them;
+    // read leniently so a stale api never breaks a job read.
+    creditCost: typeof rec.creditCost === 'number' && Number.isFinite(rec.creditCost) ? rec.creditCost : 0,
+    cached: rec.cached === true,
+    deliveryOnly: rec.deliveryOnly === true,
   };
 }
 
@@ -510,6 +639,141 @@ function validateJobDelivery(rec: Record<string, unknown>): JobDelivery {
     ...(typeof rec.bucket === 'string' ? { bucket: rec.bucket } : {}),
     ...(typeof rec.localCopyDeleted === 'boolean' ? { localCopyDeleted: rec.localCopyDeleted } : {}),
   };
+}
+
+// --- usage response validation ---------------------------------------------
+
+const USAGE_GROUP_BYS: readonly UsageGroupBy[] = ['day', 'key', 'origin', 'operation', 'source'];
+
+function asNumber(value: unknown, field: string, sourceUrl: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} response is missing numeric field "${field}"`);
+  }
+  return value;
+}
+
+/**
+ * A counter that the api may legitimately omit for a bucket that has none of
+ * it. Defaults to `0` rather than throwing: every field of a usage row is a
+ * COUNT, and "absent" and "zero" mean the same thing for a count — refusing
+ * the whole report because one origin bucket carried no `deliveryFailed` key
+ * would be a validator stricter than the data.
+ */
+function asCount(value: unknown, field: string, sourceUrl: string): number {
+  return value === undefined ? 0 : asNumber(value, field, sourceUrl);
+}
+
+function asGroupBy(value: unknown, sourceUrl: string): UsageGroupBy {
+  const found = USAGE_GROUP_BYS.find((candidate) => candidate === value);
+  if (!found) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned an unknown groupBy: ${String(value)}`);
+  }
+  return found;
+}
+
+function validateUsagePoint(value: unknown, sourceUrl: string): UsageSeriesPoint {
+  const rec = asRecord(value);
+  if (!rec) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed usage series entry`);
+  }
+  const key = asString(rec.key, 'series[].key', sourceUrl);
+  return {
+    key,
+    // The api renders a display label; a bucket whose label it has nothing
+    // better for falls back to the key itself rather than to `undefined`.
+    label: typeof rec.label === 'string' ? rec.label : key,
+    jobs: asCount(rec.jobs, 'series[].jobs', sourceUrl),
+    credits: asCount(rec.credits, 'series[].credits', sourceUrl),
+    cacheHits: asCount(rec.cacheHits, 'series[].cacheHits', sourceUrl),
+    free: asCount(rec.free, 'series[].free', sourceUrl),
+    failed: asCount(rec.failed, 'series[].failed', sourceUrl),
+    delivered: asCount(rec.delivered, 'series[].delivered', sourceUrl),
+    deliveryFailed: asCount(rec.deliveryFailed, 'series[].deliveryFailed', sourceUrl),
+    sessions: asCount(rec.sessions, 'series[].sessions', sourceUrl),
+  };
+}
+
+function validateUsageKey(value: unknown, sourceUrl: string): UsageKeyRow {
+  const rec = asRecord(value);
+  if (!rec) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed usage key entry`);
+  }
+  return {
+    id: asString(rec.id, 'keys[].id', sourceUrl),
+    name: asString(rec.name, 'keys[].name', sourceUrl),
+    kind: rec.kind === 'publishable' ? 'publishable' : 'secret',
+    // `null` is the meaningful value here (uncapped), so it is preserved
+    // rather than defaulted.
+    dailyCreditLimit:
+      rec.dailyCreditLimit === null || rec.dailyCreditLimit === undefined
+        ? null
+        : asNumber(rec.dailyCreditLimit, 'keys[].dailyCreditLimit', sourceUrl),
+    usedToday: asCount(rec.usedToday, 'keys[].usedToday', sourceUrl),
+  };
+}
+
+function validateUsageReport(json: unknown, sourceUrl: string): UsageReport {
+  const rec = asRecord(json);
+  if (!rec) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed usage report`);
+  }
+  const range = asRecord(rec.range);
+  if (!range) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a usage report with no range`);
+  }
+  const totals = asRecord(rec.totals);
+  if (!totals) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a usage report with no totals`);
+  }
+  const series = rec.series;
+  const keys = rec.keys;
+  if (!Array.isArray(series)) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a usage report with no series array`);
+  }
+  return {
+    range: { from: asString(range.from, 'range.from', sourceUrl), to: asString(range.to, 'range.to', sourceUrl) },
+    groupBy: asGroupBy(rec.groupBy, sourceUrl),
+    totals: {
+      jobs: asCount(totals.jobs, 'totals.jobs', sourceUrl),
+      credits: asCount(totals.credits, 'totals.credits', sourceUrl),
+      cacheHits: asCount(totals.cacheHits, 'totals.cacheHits', sourceUrl),
+      free: asCount(totals.free, 'totals.free', sourceUrl),
+      failed: asCount(totals.failed, 'totals.failed', sourceUrl),
+      delivered: asCount(totals.delivered, 'totals.delivered', sourceUrl),
+      deliveryFailed: asCount(totals.deliveryFailed, 'totals.deliveryFailed', sourceUrl),
+      sessions: asCount(totals.sessions, 'totals.sessions', sourceUrl),
+      activeSessions: asCount(totals.activeSessions, 'totals.activeSessions', sourceUrl),
+    },
+    series: series.map((entry) => validateUsagePoint(entry, sourceUrl)),
+    // An embed token's report carries no key roster; an empty list is the
+    // honest answer, not a malformed response.
+    keys: Array.isArray(keys) ? keys.map((entry) => validateUsageKey(entry, sourceUrl)) : [],
+  };
+}
+
+/**
+ * `?from=…&to=…` for a {@link UsageQuery} — empty and absent filters are
+ * dropped entirely, because the api distinguishes "no filter" (count
+ * everything) from an empty one.
+ */
+function usageQueryString(query: UsageQuery): string {
+  const params = new URLSearchParams();
+  const entries: readonly (readonly [string, string | undefined])[] = [
+    ['from', query.from],
+    ['to', query.to],
+    ['groupBy', query.groupBy],
+    ['source', query.source],
+    ['keyId', query.keyId],
+    ['origin', query.origin],
+    ['operation', query.operation],
+  ];
+  for (const [name, value] of entries) {
+    if (value !== undefined && value !== '') {
+      params.set(name, value);
+    }
+  }
+  const qs = params.toString();
+  return qs === '' ? '' : `?${qs}`;
 }
 
 // --- saved-destination response validation ---------------------------------
@@ -868,6 +1132,15 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     return requestJson(fetchImpl, url, { method: 'GET', headers: authHeaders(apiKey) }, validateJobView);
   }
 
+  async function getUsage(query: UsageQuery = {}): Promise<UsageReport> {
+    return requestJson(
+      fetchImpl,
+      apiUrl(`/usage${usageQueryString(query)}`),
+      { method: 'GET', headers: authHeaders(apiKey) },
+      validateUsageReport,
+    );
+  }
+
   // --- saved storage destinations -------------------------------------------
 
   function destinationUrl(id: string, suffix = ''): string {
@@ -1021,7 +1294,15 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     // "delivered: pending" forever and never learn the outcome.
     const settled =
       isTerminal(created.status) && created.delivery?.status !== 'pending'
-        ? { ...created.status, input: created.input, destination: created.destination, delivery: created.delivery }
+        ? {
+            ...created.status,
+            input: created.input,
+            destination: created.destination,
+            delivery: created.delivery,
+            creditCost: created.creditCost,
+            cached: created.cached,
+            deliveryOnly: created.deliveryOnly,
+          }
         : await pollJob(created.jobId, opts);
     const final: JobView = settled;
     const finalStatus: JobStatusResponse = final;
@@ -1032,6 +1313,9 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
           input: final.input,
           destination: final.destination,
           delivery: final.delivery,
+          creditCost: final.creditCost,
+          cached: final.cached,
+          deliveryOnly: final.deliveryOnly,
         };
         // A destination whose delivery SUCCEEDED is the one case where
         // pulling the bytes back through this process would defeat the
@@ -1143,6 +1427,7 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     upload,
     createJob,
     getJob,
+    getUsage,
     listDestinations,
     listDestinationSummaries,
     createDestination,

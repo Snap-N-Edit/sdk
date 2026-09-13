@@ -338,6 +338,9 @@ describe('lower-level client methods', () => {
       input: { kind: 'asset' },
       destination: null,
       delivery: null,
+      creditCost: 0,
+      cached: false,
+      deliveryOnly: false,
     });
   });
 
@@ -356,6 +359,9 @@ describe('lower-level client methods', () => {
       input: { kind: 'asset' },
       destination: null,
       delivery: null,
+      creditCost: 0,
+      cached: false,
+      deliveryOnly: false,
     });
   });
 });
@@ -397,6 +403,9 @@ describe('bring your own storage', () => {
           input: { kind: 'asset' },
           destination: { type: 'presigned-put' },
           delivery: null,
+          creditCost: 0,
+          cached: false,
+          deliveryOnly: false,
         }),
     ]);
 
@@ -447,6 +456,9 @@ describe('bring your own storage', () => {
           input: { kind: 'url' },
           destination: { type: 'presigned-put' },
           delivery: { status: 'delivered', attempts: 1, statusCode: 200, deliveredAt: '2099-01-01T00:00:00.000Z' },
+          creditCost: 0,
+          cached: false,
+          deliveryOnly: false,
         }),
     ]);
 
@@ -486,6 +498,9 @@ describe('bring your own storage', () => {
           input: { kind: 'url' },
           destination: { type: 'presigned-put' },
           delivery: { status: 'delivered', attempts: 1, statusCode: 200 },
+          creditCost: 0,
+          cached: false,
+          deliveryOnly: false,
         }),
     ]);
 
@@ -518,6 +533,9 @@ describe('bring your own storage', () => {
           input: { kind: 'url' },
           destination: { type: 'presigned-put' },
           delivery: { status: 'failed', attempts: 3, statusCode: 403, error: 'destination returned 403' },
+          creditCost: 0,
+          cached: false,
+          deliveryOnly: false,
         }),
       () => new Response(outputBytes, { status: 200, headers: { 'content-type': 'image/png' } }),
     ]);
@@ -537,6 +555,9 @@ describe('bring your own storage', () => {
       input: { kind: 'asset' },
       destination: { type: 'presigned-put' },
       delivery: { status: 'delivered', attempts: 1 },
+      creditCost: 0,
+      cached: false,
+      deliveryOnly: false,
     };
 
     // download: true — delivered to the bucket AND pulled back here.
@@ -628,6 +649,9 @@ describe('saved storage destinations', () => {
           input: { kind: 'asset' },
           destination: { type: 'saved', id: 'dst-1', name: 'Production' },
           delivery: null,
+          creditCost: 0,
+          cached: false,
+          deliveryOnly: false,
         }),
     ]);
 
@@ -710,6 +734,9 @@ describe('saved storage destinations', () => {
       input: { kind: 'asset' },
       destination: { type: 'saved', id: 'dst-1', name: 'Production' },
       delivery: { status: 'pending', attempts: 0 },
+      creditCost: 0,
+      cached: false,
+      deliveryOnly: false,
     };
     const { fetch, calls } = scriptedFetch([
       () => jsonResponse(202, pending),
@@ -722,6 +749,9 @@ describe('saved storage destinations', () => {
           input: pending.input,
           destination: pending.destination,
           delivery: { status: 'delivered', attempts: 1, statusCode: 200, bucket: 'my-app-images', key: 'snapnedit/2026/09/13/job-cache.png' },
+          creditCost: 0,
+          cached: false,
+          deliveryOnly: false,
         }),
     ]);
 
@@ -858,5 +888,112 @@ describe('saved storage destinations', () => {
 
     const client = createClient({ baseUrl, apiKey, fetch });
     await expect(client.testDestination('dst-9')).rejects.toBeInstanceOf(SnapneditApiError);
+  });
+});
+
+describe('usage tracking', () => {
+  const report = {
+    range: { from: '2026-08-15T00:00:00.000Z', to: '2026-09-13T23:59:59.999Z' },
+    groupBy: 'day',
+    totals: {
+      jobs: 12,
+      credits: 30,
+      cacheHits: 4,
+      free: 2,
+      failed: 1,
+      delivered: 6,
+      deliveryFailed: 0,
+      sessions: 3,
+      activeSessions: 1,
+    },
+    series: [
+      { key: '2026-09-12', label: 'Sep 12', jobs: 5, credits: 12, cacheHits: 1, free: 0, failed: 0, delivered: 2, deliveryFailed: 0, sessions: 1 },
+      { key: '2026-09-13', label: 'Sep 13', jobs: 7, credits: 18, cacheHits: 3, free: 2, failed: 1, delivered: 4, deliveryFailed: 0, sessions: 2 },
+    ],
+    keys: [
+      { id: 'key-1', name: 'CI', kind: 'secret', dailyCreditLimit: null, usedToday: 4 },
+      { id: 'key-2', name: 'Site widget', kind: 'publishable', dailyCreditLimit: 50, usedToday: 45 },
+    ],
+  };
+
+  test('getUsage() with no arguments GETs /usage with no query at all', async () => {
+    const { fetch, calls } = scriptedFetch([() => jsonResponse(200, report)]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.getUsage();
+
+    expect(calls[0]?.url).toBe('http://localhost:8787/usage');
+    expect(calls[0]?.init?.method).toBe('GET');
+    expect(result.totals.credits).toBe(30);
+    expect(result.series.map((point) => point.key)).toEqual(['2026-09-12', '2026-09-13']);
+    expect(result.keys[1]).toEqual({ id: 'key-2', name: 'Site widget', kind: 'publishable', dailyCreditLimit: 50, usedToday: 45 });
+    // `range` is echoed as the api sends it — ISO instants, not the YYYY-MM-DD the query takes.
+    expect(result.range.from).toBe('2026-08-15T00:00:00.000Z');
+  });
+
+  test('every filter reaches the query string, and an empty one is dropped rather than sent blank', async () => {
+    const { fetch, calls } = scriptedFetch([() => jsonResponse(200, { ...report, groupBy: 'origin' })]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    await client.getUsage({
+      from: '2026-09-01',
+      to: '2026-09-13',
+      groupBy: 'origin',
+      source: 'session',
+      keyId: 'key-2',
+      origin: 'https://acme.test',
+      operation: '',
+    });
+
+    expect(calls[0]?.url).toBe(
+      'http://localhost:8787/usage?from=2026-09-01&to=2026-09-13&groupBy=origin&source=session&keyId=key-2&origin=https%3A%2F%2Facme.test',
+    );
+  });
+
+  test('a bucket that omits a counter reads as 0, and a label-less bucket falls back to its key', async () => {
+    const sparse = {
+      ...report,
+      series: [{ key: 'native:com.acme.photos', jobs: 2, credits: 4 }],
+      // An embed-token caller gets NO `keys` at all — normalized to [].
+      keys: undefined,
+    };
+    const { fetch } = scriptedFetch([() => jsonResponse(200, sparse)]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    const result = await client.getUsage({ groupBy: 'day' });
+
+    expect(result.series[0]).toEqual({
+      key: 'native:com.acme.photos',
+      label: 'native:com.acme.photos',
+      jobs: 2,
+      credits: 4,
+      cacheHits: 0,
+      free: 0,
+      failed: 0,
+      delivered: 0,
+      deliveryFailed: 0,
+      sessions: 0,
+    });
+    expect(result.keys).toEqual([]);
+  });
+
+  test('a malformed report is refused rather than handed back half-typed', async () => {
+    const { fetch } = scriptedFetch([() => jsonResponse(200, { ...report, groupBy: 'weekly' })]);
+    await expect(createClient({ baseUrl, apiKey, fetch }).getUsage()).rejects.toBeInstanceOf(SnapneditApiError);
+
+    const { fetch: noSeries } = scriptedFetch([() => jsonResponse(200, { range: report.range, groupBy: 'day', totals: report.totals })]);
+    await expect(createClient({ baseUrl, apiKey, fetch: noSeries }).getUsage()).rejects.toThrow(/no series array/);
+  });
+
+  test('a range the api refuses surfaces as a typed invalid_input error', async () => {
+    const { fetch } = scriptedFetch([
+      () => jsonResponse(400, { error: { code: 'invalid_input', message: 'range must not exceed 366 days' } }),
+    ]);
+
+    const client = createClient({ baseUrl, apiKey, fetch });
+    await expect(client.getUsage({ from: '2020-01-01', to: '2026-09-13' })).rejects.toMatchObject({
+      code: 'invalid_input',
+      status: 400,
+    });
   });
 });

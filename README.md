@@ -242,6 +242,42 @@ until that delivery settles before resolving. It costs no credits, since nothing
 Full setup and per-provider bucket permissions:
 <https://snapnedit.com/docs/storage-destinations>.
 
+## Usage
+
+`getUsage()` is the metering read: what the account ran, what it cost, and
+where it came from.
+
+```ts
+const usage = await client.getUsage();                       // last 30 days, by day
+console.log(usage.totals.credits, usage.totals.cacheHits);
+
+// Embed credits per customer site, for one month.
+const byOrigin = await client.getUsage({
+  from: '2026-08-01',
+  to: '2026-08-31',
+  source: 'embed',
+  groupBy: 'origin',
+});
+for (const row of byOrigin.series) console.log(row.label, row.credits, row.jobs);
+
+// About to hit a cap? `keys` is today's spend, not the range's.
+for (const key of usage.keys) {
+  if (key.dailyCreditLimit !== null && key.usedToday / key.dailyCreditLimit > 0.8) {
+    warn(`${key.name} is at ${key.usedToday}/${key.dailyCreditLimit} today`);
+  }
+}
+```
+
+- `groupBy`: `'day'` (default) | `'key'` | `'origin'` | `'operation'` | `'source'`.
+- `keyId`, `origin`, `operation`, `source` narrow **what** is counted before it is bucketed.
+- `from`/`to` are inclusive `YYYY-MM-DD`; the range may not exceed **366 days** (`invalid_input`).
+- `totals` covers the same filters; `series` is one row per bucket; `keys` is the account's
+  key roster with **today's** spend against each daily cap (`dailyCreditLimit: null` = uncapped).
+
+Every counter (`jobs`, `credits`, `cacheHits`, `free`, `failed`, `delivered`,
+`deliveryFailed`, `sessions`) appears on both `totals` and each series row.
+Full reference: <https://snapnedit.com/docs/usage>.
+
 ## Operations
 
 The first argument to `run()`/`createJob()` is an `OperationId`. The full set

@@ -20,6 +20,18 @@ export type {
   UploadResult,
 } from './client.js';
 
+/** USAGE TRACKING — the `GET /usage` request and response shapes. */
+export { USAGE_UNATTRIBUTED } from './client.js';
+export type {
+  UsageGroupBy,
+  UsageKeyRow,
+  UsageQuery,
+  UsageReport,
+  UsageSeriesPoint,
+  UsageSource,
+  UsageTotals,
+} from './client.js';
+
 /**
  * The bring-your-own-storage wire types, re-exported so a consumer can name
  * a `destination` (or a `delivery` outcome) without depending on
