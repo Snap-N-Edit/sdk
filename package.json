@@ -1,10 +1,38 @@
 {
   "name": "@snapnedit/sdk",
   "version": "0.1.0",
+  "description": "Zero-dependency TypeScript client for the snapnedit AI photo-editing API: upload, run an operation, poll, download.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Snap-N-Edit/sdk.git"
+  },
+  "homepage": "https://snapnedit.com/docs",
+  "bugs": {
+    "url": "https://github.com/Snap-N-Edit/sdk/issues"
+  },
+  "keywords": [
+    "snapnedit",
+    "image-editing",
+    "photo-editor",
+    "ai",
+    "remove-background",
+    "upscale",
+    "api-client",
+    "sdk"
+  ],
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
