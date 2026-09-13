@@ -89,7 +89,8 @@ if (current.state === 'succeeded') {
 
 ## Operations
 
-The first argument to `run()`/`createJob()` is an `OperationId`. The full set:
+The first argument to `run()`/`createJob()` is an `OperationId`. The full set
+(`resize-image` is free — it is plain geometry, with no model behind it):
 
 | Operation | Credits | Mask | Params |
 | --- | --- | --- | --- |
@@ -109,6 +110,7 @@ The first argument to `run()`/`createJob()` is an `OperationId`. The full set:
 | `replace-background` | 2 | — | `background`: `white` \| `black` \| `studio-grey` \| `studio-blue` \| `sunset` \| `ocean` \| `lavender` |
 | `strip-metadata` | 1 | — | — |
 | `auto-remove-watermark` | 2 | — | `strength`: `low` \| `medium` \| `high` |
+| `resize-image` | 0 | — | `width`, `height` (integers 1..8192; at least one required), `fit`: `inside` \| `cover` \| `fill` (default `inside`; `cover`/`fill` need both dimensions), `format`: `png` \| `jpeg` \| `webp` (default `png`), `quality`: 1..100 (default `90`, jpeg/webp only) |
 
 Credits are the cost of a real (non-cached) run. `GET /operations` on your deployment
 returns the live catalog with each operation's JSON Schema for `params` — a
