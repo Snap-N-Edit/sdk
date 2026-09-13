@@ -1,3 +1,5 @@
+export { isStorageDestinationView } from './client.js';
+export type { StorageDestinationRow } from './client.js';
 export { createClient } from './client.js';
 export type {
   BinaryInput,

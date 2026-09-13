@@ -36,6 +36,7 @@ import type {
   JobInputKind,
   StorageDestinationInput,
   StorageDestinationPatchInput,
+  StorageDestinationSummary,
   StorageDestinationTest,
   StorageDestinationView,
   StorageProvider,
@@ -271,7 +272,17 @@ export interface SnapneditClient {
   // `destination` field at all. See https://snapnedit.com/docs/storage-destinations.
 
   /** `GET /destinations` — every saved destination on the account, credential-free (only the access key's last 4 characters are ever returned). */
-  listDestinations(): Promise<StorageDestinationView[]>;
+  /**
+   * Lists the account's saved destinations. An `sk_` key gets full
+   * {@link StorageDestinationView} rows; an EMBED token gets the reduced
+   * {@link StorageDestinationSummary} rows the server hands third-party pages
+   * (no region, endpoint, key fragment or test history). Narrow with
+   * {@link isStorageDestinationView}, or call {@link SnapneditClient.listDestinationSummaries}
+   * when the summary is all you need.
+   */
+  listDestinations(): Promise<StorageDestinationRow[]>;
+  /** {@link SnapneditClient.listDestinations} projected to the embed-safe summary shape for every caller kind. */
+  listDestinationSummaries(): Promise<StorageDestinationSummary[]>;
   /**
    * `POST /destinations` — saves a bucket and its credentials. The secret
    * access key is encrypted at rest and never returned by any endpoint,
@@ -542,12 +553,44 @@ function validateDestinationTest(value: unknown, sourceUrl: string): StorageDest
   };
 }
 
-/** Narrows one `StorageDestinationView`. Field by field, no casts — same convention as every other validator here. */
-function validateDestination(value: unknown, sourceUrl: string): StorageDestinationView {
+/** A row of `GET /destinations`: the full view for `sk_` keys, the reduced summary for embed tokens. */
+export type StorageDestinationRow = StorageDestinationView | StorageDestinationSummary;
+
+/** True when a {@link StorageDestinationRow} is the full view (the caller authenticated with an `sk_` key). */
+export function isStorageDestinationView(row: StorageDestinationRow): row is StorageDestinationView {
+  return 'keyPrefix' in row && 'accessKeyIdLast4' in row;
+}
+
+/** Narrows one embed-safe `StorageDestinationSummary`. */
+function validateDestinationSummary(rec: Record<string, unknown>, sourceUrl: string): StorageDestinationSummary {
+  return {
+    id: asString(rec.id, 'id', sourceUrl),
+    name: asString(rec.name, 'name', sourceUrl),
+    provider: asStorageProvider(rec.provider, sourceUrl),
+    bucket: asString(rec.bucket, 'bucket', sourceUrl),
+    isDefault: asBoolean(rec.isDefault, 'isDefault', sourceUrl),
+  };
+}
+
+/**
+ * Narrows one `GET /destinations` row. Field by field, no casts — same
+ * convention as every other validator here. The server sends the full view
+ * to `sk_` callers and the summary to embed tokens; the two are told apart by
+ * the presence of the view-only fields, not by who we think we are.
+ */
+function validateDestination(value: unknown, sourceUrl: string): StorageDestinationRow {
   const rec = asRecord(value);
   if (!rec) {
     throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed storage destination`);
   }
+  if (rec.keyPrefix === undefined && rec.accessKeyIdLast4 === undefined) {
+    return validateDestinationSummary(rec, sourceUrl);
+  }
+  return validateDestinationView(rec, sourceUrl);
+}
+
+/** Narrows one full `StorageDestinationView` (management routes always return this shape). */
+function validateDestinationView(rec: Record<string, unknown>, sourceUrl: string): StorageDestinationView {
   return {
     id: asString(rec.id, 'id', sourceUrl),
     name: asString(rec.name, 'name', sourceUrl),
@@ -566,7 +609,7 @@ function validateDestination(value: unknown, sourceUrl: string): StorageDestinat
   };
 }
 
-function validateDestinationList(json: unknown, sourceUrl: string): StorageDestinationView[] {
+function validateDestinationList(json: unknown, sourceUrl: string): StorageDestinationRow[] {
   const rec = asRecord(json);
   const list = rec?.destinations;
   if (!Array.isArray(list)) {
@@ -580,7 +623,16 @@ function validateDestinationEnvelope(json: unknown, sourceUrl: string): StorageD
   if (!rec) {
     throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed destination response`);
   }
-  return validateDestination(rec.destination, sourceUrl);
+  return validateDestinationViewChecked(rec.destination, sourceUrl);
+}
+
+/** Management routes always answer with the full view; anything less is a malformed response. */
+function validateDestinationViewChecked(value: unknown, sourceUrl: string): StorageDestinationView {
+  const row = validateDestination(value, sourceUrl);
+  if (!isStorageDestinationView(row)) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a destination summary where the full view was expected`);
+  }
+  return row;
 }
 
 function validateDestinationTestResult(json: unknown, sourceUrl: string): DestinationTestResult {
@@ -822,12 +874,21 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     return apiUrl(`/destinations/${encodeURIComponent(id)}${suffix}`);
   }
 
-  async function listDestinations(): Promise<StorageDestinationView[]> {
+  async function listDestinations(): Promise<StorageDestinationRow[]> {
     return requestJson(
       fetchImpl,
       apiUrl('/destinations'),
       { method: 'GET', headers: authHeaders(apiKey) },
       validateDestinationList,
+    );
+  }
+
+  async function listDestinationSummaries(): Promise<StorageDestinationSummary[]> {
+    const rows = await listDestinations();
+    return rows.map((row) =>
+      isStorageDestinationView(row)
+        ? { id: row.id, name: row.name, provider: row.provider, bucket: row.bucket, isDefault: row.isDefault }
+        : row,
     );
   }
 
@@ -1083,6 +1144,7 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     createJob,
     getJob,
     listDestinations,
+    listDestinationSummaries,
     createDestination,
     updateDestination,
     deleteDestination,
