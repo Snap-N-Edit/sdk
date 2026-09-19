@@ -44,6 +44,12 @@ export interface WebhookJobEnvelope {
     statusCode?: number;
     error?: string;
   } | null;
+  /** Credits actually debited for the job (0 for free operations, cache hits and delivery-only rows). Absent on events from servers that predate usage tracking. */
+  creditCost?: number;
+  /** True when the job was satisfied from the result cache. */
+  cached?: boolean;
+  /** True when the job only delivered an already-cached result to a destination. */
+  deliveryOnly?: boolean;
 }
 
 /**
