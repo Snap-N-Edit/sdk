@@ -126,6 +126,20 @@ export interface ListJobsQuery {
   priority?: 'interactive' | 'background';
 }
 
+/** Events a webhook endpoint can subscribe to. */
+export type WebhookEndpointEvent = 'job.succeeded' | 'job.failed' | 'session.ended';
+
+/** A webhook endpoint as every read returns it — never the signing secret. */
+export interface WebhookEndpoint {
+  id: string;
+  accountId: string;
+  url: string;
+  events: WebhookEndpointEvent[];
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** One row of `GET /jobs?limit=`: a {@link JobView} plus its id and creation time. */
 export type JobListItem = JobView & { jobId: string; createdAt: string };
 
@@ -422,6 +436,17 @@ export interface SnapneditClient {
 
   /** `GET /jobs?limit=` (secret key only): your newest jobs, newest first. */
   listJobs(query?: ListJobsQuery): Promise<JobListItem[]>;
+
+  /** `GET /webhook-endpoints` (secret key only). */
+  listWebhookEndpoints(): Promise<WebhookEndpoint[]>;
+  /** `POST /webhook-endpoints`: a public https url; `events` defaults to all. The signing `secret` is returned only here and on rotate. */
+  createWebhookEndpoint(input: { url: string; events?: WebhookEndpointEvent[] }): Promise<{ endpoint: WebhookEndpoint; secret: string }>;
+  /** `PATCH /webhook-endpoints/:id`: pause (`false`) or resume (`true`). */
+  setWebhookEndpointActive(id: string, active: boolean): Promise<WebhookEndpoint>;
+  /** `DELETE /webhook-endpoints/:id`. */
+  deleteWebhookEndpoint(id: string): Promise<void>;
+  /** `POST /webhook-endpoints/:id/rotate`: the old secret stops signing at once; the new one is returned. */
+  rotateWebhookSecret(id: string): Promise<string>;
 
   /** `GET /destinations` — every saved destination on the account, credential-free (only the access key's last 4 characters are ever returned). */
   /**
@@ -962,6 +987,22 @@ function validatePresignResponse(json: unknown, sourceUrl: string): DestinationP
   };
 }
 
+function validateWebhookEndpoint(json: unknown, sourceUrl: string): WebhookEndpoint {
+  const rec = asRecord(json);
+  if (!rec || !Array.isArray(rec.events)) {
+    throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed webhook endpoint`);
+  }
+  return {
+    id: asString(rec.id, 'id', sourceUrl),
+    accountId: asString(rec.accountId, 'accountId', sourceUrl),
+    url: asString(rec.url, 'url', sourceUrl),
+    events: rec.events.filter((e): e is WebhookEndpointEvent => typeof e === 'string') as WebhookEndpointEvent[],
+    active: rec.active === true,
+    createdAt: asString(rec.createdAt, 'createdAt', sourceUrl),
+    updatedAt: asString(rec.updatedAt, 'updatedAt', sourceUrl),
+  };
+}
+
 /** `GET /jobs/:id`: the status union and the envelope, spread into one object by the api. */
 function validateJobView(json: unknown, sourceUrl: string): JobView {
   const rec = asRecord(json);
@@ -1203,6 +1244,51 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     });
   }
 
+  function webhookEndpointUrl(id = '', suffix = ''): string {
+    return apiUrl(`/webhook-endpoints${id ? `/${encodeURIComponent(id)}` : ''}${suffix}`);
+  }
+
+  async function listWebhookEndpoints(): Promise<WebhookEndpoint[]> {
+    return requestJson(fetchImpl, webhookEndpointUrl(), { method: 'GET', headers: authHeaders(apiKey) }, (json, sourceUrl) => {
+      const endpoints = asRecord(json)?.endpoints;
+      if (!Array.isArray(endpoints)) {
+        throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed webhook endpoint list`);
+      }
+      return endpoints.map((row: unknown) => validateWebhookEndpoint(row, sourceUrl));
+    });
+  }
+
+  async function createWebhookEndpoint(input: { url: string; events?: WebhookEndpointEvent[] }): Promise<{ endpoint: WebhookEndpoint; secret: string }> {
+    return requestJson(
+      fetchImpl,
+      webhookEndpointUrl(),
+      { method: 'POST', headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' }, body: JSON.stringify(input) },
+      (json, sourceUrl) => {
+        const rec = asRecord(json);
+        return { endpoint: validateWebhookEndpoint(rec?.endpoint, sourceUrl), secret: asString(rec?.secret, 'secret', sourceUrl) };
+      },
+    );
+  }
+
+  async function setWebhookEndpointActive(id: string, active: boolean): Promise<WebhookEndpoint> {
+    return requestJson(
+      fetchImpl,
+      webhookEndpointUrl(id),
+      { method: 'PATCH', headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' }, body: JSON.stringify({ active }) },
+      (json, sourceUrl) => validateWebhookEndpoint(asRecord(json)?.endpoint, sourceUrl),
+    );
+  }
+
+  async function deleteWebhookEndpoint(id: string): Promise<void> {
+    await requestVoid(fetchImpl, webhookEndpointUrl(id), { method: 'DELETE', headers: authHeaders(apiKey) });
+  }
+
+  async function rotateWebhookSecret(id: string): Promise<string> {
+    return requestJson(fetchImpl, webhookEndpointUrl(id, '/rotate'), { method: 'POST', headers: authHeaders(apiKey) }, (json, sourceUrl) =>
+      asString(asRecord(json)?.secret, 'secret', sourceUrl),
+    );
+  }
+
   // --- saved storage destinations -------------------------------------------
 
   function destinationUrl(id: string, suffix = ''): string {
@@ -1364,6 +1450,7 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
             creditCost: created.creditCost,
             cached: created.cached,
             deliveryOnly: created.deliveryOnly,
+            ...(created.test ? { test: true as const } : {}),
           }
         : await pollJob(created.jobId, opts);
     const final: JobView = settled;
@@ -1378,6 +1465,7 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
           creditCost: final.creditCost,
           cached: final.cached,
           deliveryOnly: final.deliveryOnly,
+          ...(final.test ? { test: true as const } : {}),
         };
         // A destination whose delivery SUCCEEDED is the one case where
         // pulling the bytes back through this process would defeat the
@@ -1492,6 +1580,11 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     getUsage,
     getAccount,
     listJobs,
+    listWebhookEndpoints,
+    createWebhookEndpoint,
+    setWebhookEndpointActive,
+    deleteWebhookEndpoint,
+    rotateWebhookSecret,
     listDestinations,
     listDestinationSummaries,
     createDestination,

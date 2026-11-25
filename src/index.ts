@@ -29,6 +29,8 @@ export type {
   AccountInfo,
   ListJobsQuery,
   JobListItem,
+  WebhookEndpoint,
+  WebhookEndpointEvent,
   UsageReport,
   UsageSeriesPoint,
   UsageSource,
