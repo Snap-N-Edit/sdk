@@ -105,7 +105,29 @@ export interface JobEnvelope {
   cached: boolean;
   /** True when the job only delivered an already-cached result to a destination. */
   deliveryOnly: boolean;
+  /** Present (and `true`) only for a job created with an `sk_test_` key: free, and the result is a placeholder image, not a model run. */
+  test?: true;
 }
+
+/** `GET /account`: who a secret key belongs to, its balance, and its mode. */
+export interface AccountInfo {
+  accountId: string;
+  email: string | null;
+  plan: string;
+  credits: number;
+  key: { id: string; mode: 'live' | 'test' };
+}
+
+/** Filters for {@link SnapneditClient.listJobs}. */
+export interface ListJobsQuery {
+  /** 1-100, default 20. */
+  limit?: number;
+  status?: 'queued' | 'processing' | 'succeeded' | 'failed' | 'canceled';
+  priority?: 'interactive' | 'background';
+}
+
+/** One row of `GET /jobs?limit=`: a {@link JobView} plus its id and creation time. */
+export type JobListItem = JobView & { jobId: string; createdAt: string };
 
 /**
  * What `GET /jobs/:id` returns: the job's status plus its {@link JobEnvelope}.
@@ -395,6 +417,12 @@ export interface SnapneditClient {
    */
   getUsage(query?: UsageQuery): Promise<UsageReport>;
 
+  /** `GET /account` (secret key only): the account, its credit balance, and whether this key is `live` or `test`. */
+  getAccount(): Promise<AccountInfo>;
+
+  /** `GET /jobs?limit=` (secret key only): your newest jobs, newest first. */
+  listJobs(query?: ListJobsQuery): Promise<JobListItem[]>;
+
   /** `GET /destinations` — every saved destination on the account, credential-free (only the access key's last 4 characters are ever returned). */
   /**
    * Lists the account's saved destinations. An `sk_` key gets full
@@ -605,6 +633,7 @@ function validateJobEnvelope(rec: Record<string, unknown>): JobEnvelope {
     creditCost: typeof rec.creditCost === 'number' && Number.isFinite(rec.creditCost) ? rec.creditCost : 0,
     cached: rec.cached === true,
     deliveryOnly: rec.deliveryOnly === true,
+    ...(rec.test === true ? { test: true as const } : {}),
   };
 }
 
@@ -1141,6 +1170,39 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     );
   }
 
+  async function getAccount(): Promise<AccountInfo> {
+    return requestJson(fetchImpl, apiUrl('/account'), { method: 'GET', headers: authHeaders(apiKey) }, (json, sourceUrl) => {
+      const rec = asRecord(json);
+      const key = asRecord(rec?.key);
+      if (!rec || !key) {
+        throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed account`);
+      }
+      return {
+        accountId: asString(rec.accountId, 'accountId', sourceUrl),
+        email: typeof rec.email === 'string' ? rec.email : null,
+        plan: asString(rec.plan, 'plan', sourceUrl),
+        credits: typeof rec.credits === 'number' ? rec.credits : 0,
+        key: { id: asString(key.id, 'key.id', sourceUrl), mode: key.mode === 'test' ? 'test' : 'live' },
+      };
+    });
+  }
+
+  async function listJobs(query: ListJobsQuery = {}): Promise<JobListItem[]> {
+    const params = new URLSearchParams({ limit: String(query.limit ?? 20) });
+    if (query.status) params.set('status', query.status);
+    if (query.priority) params.set('priority', query.priority);
+    return requestJson(fetchImpl, apiUrl(`/jobs?${params.toString()}`), { method: 'GET', headers: authHeaders(apiKey) }, (json, sourceUrl) => {
+      const jobs = asRecord(json)?.jobs;
+      if (!Array.isArray(jobs)) {
+        throw new SnapneditApiError('internal', 0, `${sourceUrl} returned a malformed job list`);
+      }
+      return jobs.map((job: unknown) => {
+        const rec = asRecord(job) ?? {};
+        return { ...validateJobView(rec, sourceUrl), jobId: asString(rec.jobId, 'jobId', sourceUrl), createdAt: asString(rec.createdAt, 'createdAt', sourceUrl) };
+      });
+    });
+  }
+
   // --- saved storage destinations -------------------------------------------
 
   function destinationUrl(id: string, suffix = ''): string {
@@ -1428,6 +1490,8 @@ export function createClient(options: CreateClientOptions): SnapneditClient {
     createJob,
     getJob,
     getUsage,
+    getAccount,
+    listJobs,
     listDestinations,
     listDestinationSummaries,
     createDestination,
